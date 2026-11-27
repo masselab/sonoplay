@@ -632,12 +632,12 @@ class VirtualDlnaDevice:
         }
         if state is None:
             return 0
-        return priority_map.get(str(state).upper(), 0)
+        return priority_map.get(state.upper(), 0)
 
     @classmethod
     def _prioritize_state(cls, current: Optional[str], candidate: Optional[str]) -> Optional[str]:
-        candidate_norm = str(candidate).upper() if candidate else None
-        current_norm = str(current).upper() if current else None
+        candidate_norm = candidate.upper() if candidate else None
+        current_norm = current.upper() if current else None
         if candidate_norm is None:
             return current_norm
         if current_norm is None:
@@ -661,7 +661,7 @@ class VirtualDlnaDevice:
             raw_state = getattr(adapter.state, "state", None)
             if raw_state is None:
                 continue
-            normalized = str(raw_state).upper()
+            normalized = raw_state.upper()
             if not normalized:
                 continue
             score = self._state_priority(normalized)
@@ -680,7 +680,7 @@ class VirtualDlnaDevice:
     def _format_ms(duration_ms: Optional[int]) -> str:
         if not duration_ms or duration_ms <= 0:
             return "00:00:00"
-        total_seconds = max(0, int(duration_ms // 1000))
+        total_seconds = max(0, duration_ms // 1000)
         hours, remainder = divmod(total_seconds, 3600)
         minutes, seconds = divmod(remainder, 60)
         return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
@@ -717,7 +717,7 @@ class VirtualDlnaDevice:
                 adapter = await adapter_by_device(device)
                 stats = adapter.stats_snapshot()
                 state_value = getattr(adapter.state, "state", None)
-                normalized_state = str(state_value).upper() if state_value else None
+                normalized_state = state_value.upper() if state_value else None
                 current_uri = getattr(adapter.state, "current_uri", None)
                 elapsed_ms = getattr(adapter.state, "elapsed", 0) or 0
                 status = stats.get("status", "offline")

@@ -1,11 +1,22 @@
-import aiohttp
-import re
-import xmltodict
-from dotmap import DotMap
+from datetime import datetime, timedelta
 from html import escape as xml_escape
+import re
+from typing import Any, Protocol
+
+import aiohttp
+from dotmap import DotMap
+import xmltodict
 
 from settings import settings
-from datetime import timedelta, datetime
+
+
+class PlexDeviceLike(Protocol):
+    @property
+    def uuid(self) -> str: ...
+    @property
+    def model(self) -> str | None: ...
+    @property
+    def name(self) -> str | None: ...
 
 
 UPNP_AVT_SERVICE_TYPE = "urn:schemas-upnp-org:service:AVTransport:1"
@@ -72,16 +83,31 @@ def require_valid_uuid(uuid: str | None) -> None:
         )
 
 
-class G(object):
+class G:
 
-    def __init__(self):
-        self.http: aiohttp.ClientSession = None
+    def __init__(self) -> None:
+        self._http: aiohttp.ClientSession | None = None
+
+    @property
+    def http(self) -> aiohttp.ClientSession:
+        if self._http is None:
+            raise RuntimeError("HTTP session not initialized")
+        return self._http
+
+    @http.setter
+    def http(self, session: aiohttp.ClientSession | None) -> None:
+        self._http = session
+
+    async def close_http(self) -> None:
+        if self._http is not None:
+            await self._http.close()
+            self._http = None
 
 
 g = G()
 
 
-def unescape_xml(xml):
+def unescape_xml(xml: bytes) -> str:
     from html import unescape
     return unescape(xml.decode())
 
@@ -98,7 +124,7 @@ def escape_bare_ampersands(xml: str) -> str:
     return _BARE_AMPERSAND_RE.sub(lambda match: match.group(1) or '&amp;', xml)
 
 
-def xml2dict(xml):
+def xml2dict(xml: str | bytes) -> DotMap:
     if not isinstance(xml, str):
         xml = escape_bare_ampersands(unescape_xml(xml))
     parsed = xmltodict.parse(xml,
@@ -153,10 +179,10 @@ def mime_type_for_container(container: str | None) -> str:
     """
     if not container:
         return DEFAULT_AUDIO_MIME_TYPE
-    return CONTAINER_MIME_TYPES.get(str(container).strip().lower(), DEFAULT_AUDIO_MIME_TYPE)
+    return CONTAINER_MIME_TYPES.get(container.strip().lower(), DEFAULT_AUDIO_MIME_TYPE)
 
 
-def _format_didl_duration(duration_ms) -> str | None:
+def _format_didl_duration(duration_ms: int | str | None) -> str | None:
     """Format milliseconds as a UPnP res duration string (H+:MM:SS.mmm)."""
     if not duration_ms:
         return None
@@ -170,24 +196,19 @@ def _format_didl_duration(duration_ms) -> str | None:
     return f"{hours}:{minutes:02d}:{seconds:02d}.{millis:03d}"
 
 
-def build_didl_lite_metadata(*, item_id, title, url, mime_type=DEFAULT_AUDIO_MIME_TYPE,
-                              upnp_class="object.item.audioItem.musicTrack",
-                              artist=None, album=None, duration_ms=None) -> str:
-    """Build a minimal DIDL-Lite document for use as CurrentURIMetaData.
-
-    Many DLNA renderers (Samsung soundbars/TVs in particular) reject
-    SetAVTransportURI with a UPnPError SOAP Fault when CurrentURIMetaData is
-    empty, since they have no way to classify the resource without it.
-    Sonos and most other renderers tolerate empty metadata, which is why
-    this went unnoticed until a stricter renderer was tested (see issue #10).
-
-    The returned string is plain (unescaped-once) XML. It is XML-escaped a
-    second time by payload_from_template when embedded as text content of
-    the outer SOAP envelope's <CurrentURIMetaData> element - that's correct
-    and required: a DLNA control point decodes the envelope once and expects
-    the result to itself be well-formed DIDL-Lite XML.
-    """
-    def esc(value):
+def build_didl_lite_metadata(
+    *,
+    item_id: Any,
+    title: Any,
+    url: Any,
+    mime_type: str = DEFAULT_AUDIO_MIME_TYPE,
+    upnp_class: str = "object.item.audioItem.musicTrack",
+    artist: str | None = None,
+    album: str | None = None,
+    duration_ms: int | str | None = None,
+) -> str:
+    """Build a minimal DIDL-Lite document for use as CurrentURIMetaData."""
+    def esc(value: Any) -> str:
         return xml_escape(str(value)) if value else ""
 
     duration_attr = ""
@@ -213,13 +234,13 @@ def build_didl_lite_metadata(*, item_id, title, url, mime_type=DEFAULT_AUDIO_MIM
     )
 
 
-def _base_plex_headers(device) -> dict:
+def _base_plex_headers(device: PlexDeviceLike) -> dict[str, str]:
     """Build common Plex protocol headers shared by all header functions."""
-    product = settings.product or device.model
+    product = settings.product or device.model or "SonoPlay"
     device_model = settings.client_model or device.model or product
     device_header = settings.client_device or device_model
     device_name = getattr(device, "name", None) or settings.client_device_name or product
-    headers = {
+    headers: dict[str, str] = {
         'X-Plex-Client-Identifier': device.uuid,
         'X-Plex-Device': device_header,
         'X-Plex-Device-Name': device_name,
@@ -234,13 +255,13 @@ def _base_plex_headers(device) -> dict:
     return headers
 
 
-def pms_header(device):
+def pms_header(device: PlexDeviceLike) -> dict[str, str]:
     headers = _base_plex_headers(device)
     headers['X-Plex-Provides'] = 'player,pubsub-player'
     return headers
 
 
-def plex_server_response_headers(device):
+def plex_server_response_headers(device: PlexDeviceLike) -> dict[str, str]:
     headers = _base_plex_headers(device)
     headers.update({
         'Accept': '*/*',
@@ -251,7 +272,7 @@ def plex_server_response_headers(device):
     return headers
 
 
-def subscriber_send_headers(device):
+def subscriber_send_headers(device: PlexDeviceLike) -> dict[str, str]:
     headers = _base_plex_headers(device)
     headers.update({
         'Content-Type': 'application/xml',
@@ -262,7 +283,7 @@ def subscriber_send_headers(device):
     return headers
 
 
-def timeline_poll_headers(device):
+def timeline_poll_headers(device: PlexDeviceLike) -> dict[str, str]:
     return {
         'X-Plex-Client-Identifier': device.uuid,
         'X-Plex-Protocol': '1.0',
@@ -273,7 +294,7 @@ def timeline_poll_headers(device):
     }
 
 
-def extract_value(value, default=None):
+def extract_value(value: Any, default: Any = None) -> Any:
     if value is None:
         return default
     if isinstance(value, DotMap):
@@ -297,12 +318,12 @@ def extract_value(value, default=None):
     return value
 
 
-def _extract_time_value(value):
+def _extract_time_value(value: Any) -> str:
     extracted = extract_value(value, default="00:00:00")
     return str(extracted)
 
 
-def parse_timedelta(value):
+def parse_timedelta(value: Any) -> timedelta:
     s = _extract_time_value(value)
     if not s or s in ("NOT_IMPLEMENTED", "None"):
         return timedelta(0)
@@ -321,7 +342,14 @@ def parse_timedelta(value):
     return delta
 
 
-def convert_volume(value: int, from_max: int, from_min: int, to_max: int, to_min: int, to_step: int):
+def convert_volume(
+    value: int,
+    from_max: int,
+    from_min: int,
+    to_max: int,
+    to_min: int,
+    to_step: int,
+) -> int:
     if from_max == to_max and from_min == to_min:
         return value
     if from_max - from_min == to_max - to_min:
@@ -332,7 +360,5 @@ def convert_volume(value: int, from_max: int, from_min: int, to_max: int, to_min
     if to_step == 0:
         to_step = 1
     percent = float(value - from_min) / float(from_range)
-    value = percent * (to_max - to_min)
-    value = int(value / to_step)
-    value += to_min
-    return value
+    scaled = percent * (to_max - to_min)
+    return int(scaled / to_step) + to_min

@@ -39,6 +39,8 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "httpx>=0.24.0",
+    "pyrefly>=1.5.0",
+    "types-xmltodict>=1.0.1.20260518",
 ]
 
 [project.urls]
@@ -58,3 +60,17 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+[tool.pyrefly]
+project-includes = [
+    "dlna",
+    "plex",
+    "settings",
+    "src",
+    "utils",
+    "main.py",
+    "logging_config.py",
+    "version.py",
+]
+search-path = [".", "src"]
+python-version = "3.11"

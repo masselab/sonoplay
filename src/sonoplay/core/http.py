@@ -1,7 +1,6 @@
 """HTTP client management for Sonoplay."""
 
 import aiohttp
-from typing import Optional
 
 
 class HttpClient:
@@ -13,8 +12,8 @@ class HttpClient:
         await http_client.stop()
     """
     
-    def __init__(self):
-        self._session: Optional[aiohttp.ClientSession] = None
+    def __init__(self) -> None:
+        self._session: aiohttp.ClientSession | None = None
     
     @property
     def session(self) -> aiohttp.ClientSession:

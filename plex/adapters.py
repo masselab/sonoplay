@@ -20,6 +20,7 @@
 # (at your option) any later version.
 
 import asyncio
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, datetime, timezone
 import logging
@@ -1260,7 +1261,7 @@ class PlexDlnaAdapter(object):
                 except asyncio.CancelledError:
                     raise
                 except asyncio.TimeoutError:
-                    logger.debug("Plex TV connection update timed out for %s", self.dlna.name)
+                    logger.warning("Plex TV connection update timed out for %s", self.dlna.name)
                 except Exception:
                     logger.exception("Unexpected error updating Plex TV connection")
                 await asyncio.sleep(60)
@@ -1274,8 +1275,18 @@ class PlexDlnaAdapter(object):
             self.plex_bind_token = settings.get_token_for_uuid(self.dlna.uuid)
             if not self.plex_bind_token:
                 return
+        # Register the auto-detected (bridge) connection for the Plex server's
+        # CompanionProxy, PLUS any EXTRA_CONNECTION_HOST (the host LAN IP) so LAN
+        # clients like PlexAmp/Plex mobile see a reachable connection. Without a
+        # phone-reachable URI the app hides the player even though Plex Web (which
+        # routes via the server) still works. Connection[][uri] is an array field,
+        # so send repeated entries as a list of tuples.
+        conn = [("Connection[][uri]", f"http://{settings.host_ip}:{settings.http_port}")]
+        extra = os.environ.get("EXTRA_CONNECTION_HOST")
+        if extra:
+            conn.append(("Connection[][uri]", f"http://{extra}:{settings.http_port}"))
         await g.http.put(f"https://plex.tv/devices/{self.dlna.uuid}?X-Plex-Token={self.plex_bind_token}",
-                         data={"Connection[][uri]": f"http://{settings.host_ip}:{settings.http_port}"},
+                         data=conn,
                          headers=pms_header(self.dlna))
 
     def update_state(self, info):

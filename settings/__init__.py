@@ -126,6 +126,8 @@ class Settings(BaseSettings):
     # but hairpin NAT is unavailable — speakers can't reach PMS via WAN IP.
     # Set to PMS's LAN IP (e.g. PMS_ADDRESS=192.168.1.100) to force local routing.
     pms_address: str | None = None
+    extra_connection_host: str | None = None
+    dlna_callback_host: str | None = None
 
     def __init__(self, **values):
         super().__init__(**values)

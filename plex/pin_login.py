@@ -1,21 +1,21 @@
-from dlna.dlna_device import DlnaDevice
-from utils import pms_header, xml2dict, g
-from settings import settings
-from datetime import datetime, timedelta, timezone
-import aiohttp
 import asyncio
+from datetime import datetime, timedelta, timezone
 import logging
 import time
+from typing import Any
+
+import aiohttp
+
+from settings import settings
+from utils import PlexDeviceLike, g, pms_header, xml2dict
 
 logger = logging.getLogger(__name__)
 
 PINS = 'https://plex.tv/api/v2/pins'
 CHECKPINS = 'https://plex.tv/api/v2/pins/{pin_id}'
 
-# Cache PINs to avoid hammering plex.tv API
-# Format: {uuid: {'pin': code, 'pin_id': id, 'expires': datetime, 'added': timestamp}}
-_pin_cache = {}
-PIN_CACHE_DURATION = timedelta(minutes=15)  # PINs are valid for 15 minutes
+_pin_cache: dict[str, dict[str, Any]] = {}
+PIN_CACHE_DURATION = timedelta(minutes=15)
 
 
 def cleanup_expired_pins() -> int:
@@ -67,7 +67,7 @@ def evict_if_needed() -> int:
     return removed
 
 
-async def get_pin(device: DlnaDevice):
+async def get_pin(device: PlexDeviceLike) -> tuple[str, str]:
     """Get a PIN for the device, using cached value if available and not expired"""
     now = datetime.now(timezone.utc)
     
@@ -106,13 +106,12 @@ async def get_pin(device: DlnaDevice):
         raise
 
 
-def clear_pin_cache(uuid: str):
-    """Clear cached PIN for a device (called after successful linking)"""
+def clear_pin_cache(uuid: str) -> None:
     if uuid in _pin_cache:
         del _pin_cache[uuid]
 
 
-async def check_pin(pin_id, device: DlnaDevice):
+async def check_pin(pin_id: str | int, device: PlexDeviceLike) -> str | None:
     try:
         timeout = aiohttp.ClientTimeout(total=settings.http_timeout_plex_tv)
         async with g.http.get(CHECKPINS.format(pin_id=pin_id), headers=pms_header(device), timeout=timeout) as p:

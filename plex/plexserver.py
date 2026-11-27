@@ -20,45 +20,49 @@
 # (at your option) any later version.
 
 from collections import OrderedDict
-
-from fastapi import FastAPI, Request, Header, Query, HTTPException, Form
-from fastapi.responses import Response
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from html import escape as xml_escape
+import asyncio
+import logging
+import time
+from typing import Any, Dict, List, NoReturn, Optional
+
+import aiohttp
+from aiohttp import ClientConnectionError
+from fastapi import FastAPI, Form, Header, HTTPException, Query, Request
+from fastapi.responses import Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 import uvicorn
-import logging
 
 from dlna import (
+    CapabilityMismatchError,
+    DlnaDiscover,
+    UnknownMemberError,
+    VirtualDeviceError,
+    create_virtual_device,
+    delete_virtual_device,
+    devices,
     get_device_by_uuid,
     get_device_data,
-    DlnaDiscover,
-    devices,
-    list_virtual_devices,
-    load_virtual_devices,
-    list_virtual_devices_with_summaries,
-    create_virtual_device,
-    update_virtual_device,
-    delete_virtual_device,
     list_physical_device_snapshots,
-    VirtualDeviceError,
-    CapabilityMismatchError,
-    UnknownMemberError,
+    list_virtual_devices,
+    list_virtual_devices_with_summaries,
+    load_virtual_devices,
+    update_virtual_device,
 )
-from typing import List, Optional, Dict, Any
-from plex.subscribe import sub_man
-from utils import plex_server_response_headers, xml2dict, timeline_poll_headers, g, require_valid_uuid
-from settings import settings
-import asyncio
 from dlna.dlna_device import DlnaDevice, NotARendererError
+from dlna.virtual.devices import VirtualDlnaDevice
+from plex import pin_login
 from plex.adapters import adapter_by_device
 from plex.gdm import PlexGDM
-from fastapi.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
-from plex import pin_login
-from datetime import datetime, timedelta, timezone
+from plex.subscribe import sub_man
+from settings import settings
+from utils import g, plex_server_response_headers, require_valid_uuid, timeline_poll_headers, xml2dict
 from version import VERSION
-import aiohttp
-import time
 
 
 # Security note: This application assumes deployment on a trusted LAN.
@@ -101,18 +105,22 @@ class AudioSettingsUpdate(BaseModel):
     sample_rate_hz: Optional[int] = Field(default=None, ge=0, le=384000)
 
 
-plex_server = FastAPI()
+@asynccontextmanager
+async def _lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    await on_startup()
+    try:
+        yield
+    finally:
+        await on_shutdown()
+
+
+plex_server = FastAPI(lifespan=_lifespan)
 s = plex_server
 plex_server.mount("/static", StaticFiles(directory="static"), name="static")
 
 
-# Global handler: when a DLNA device becomes unreachable mid-request,
-# return 503 instead of letting the unhandled exception produce a 500.
-from aiohttp import ClientConnectionError  # noqa: E402
-
-
 @s.exception_handler(ClientConnectionError)
-async def handle_device_unreachable(request: Request, exc: ClientConnectionError):
+async def handle_device_unreachable(request: Request, exc: ClientConnectionError) -> Response:
     logger.warning("device unreachable during request %s: %s", request.url.path, exc)
     return Response(
         content='<Response code="503" status="Device unreachable"/>',
@@ -129,7 +137,7 @@ _DISCOVERY_ERROR_TTL = 600
 _discovery_errors: OrderedDict[str, tuple[int, float]] = OrderedDict()
 
 
-async def on_new_dlna_device(location_url):
+async def on_new_dlna_device(location_url: str) -> None:
     logger.debug("got new dlna device location url %s", location_url)
     for d in devices:
         if d.location_url == location_url:
@@ -168,7 +176,7 @@ async def on_new_dlna_device(location_url):
     _gdm_instances.append(gdm)
 
 
-_gdm_instances: list = []
+_gdm_instances: list[PlexGDM] = []
 
 dlna_discover = DlnaDiscover(on_new_dlna_device)
 
@@ -179,7 +187,7 @@ def _count_user_configured_devices() -> int:
     for uuid, entry in data.items():
         if not isinstance(entry, dict):
             continue
-        if str(uuid).startswith("__"):
+        if uuid.startswith("__"):
             continue
         token = entry.get('token')
         alias = entry.get('alias')
@@ -188,7 +196,7 @@ def _count_user_configured_devices() -> int:
     return count
 
 
-async def guess_host_ip(request: Request):
+async def guess_host_ip(request: Request) -> None:
     if settings.host_ip not in (None, "0.0.0.0"):
         return
     host = request.url.hostname or ""
@@ -200,18 +208,23 @@ async def guess_host_ip(request: Request):
             return
     settings.host_ip = host
     logger.info("guessed host ip %s", settings.host_ip)
-    target_devices = list(devices)
+    target_devices: list[DlnaDevice | VirtualDlnaDevice] = list(devices)
     target_devices.extend(list_virtual_devices())
     for device in target_devices:
         adapter = await adapter_by_device(device)
         asyncio.create_task(adapter.update_plex_tv_connection())
 
 
-async def build_response(content: str, device: DlnaDevice = None, target_uuid: str = None, status_code: int = 200,
-                         headers=None):
+async def build_response(
+    content: str,
+    device: DlnaDevice | VirtualDlnaDevice | None = None,
+    target_uuid: str | None = None,
+    status_code: int = 200,
+    headers: dict[str, str] | None = None,
+) -> Response:
     if device is None and target_uuid is None:
         raise Exception("device and target uuid cannot both be none")
-    if device is None:
+    if device is None and target_uuid is not None:
         device = await get_device_by_uuid(target_uuid)
     if device is None:
         if headers is None:
@@ -221,19 +234,14 @@ async def build_response(content: str, device: DlnaDevice = None, target_uuid: s
                 'Accept-Language': 'en'}
             if target_uuid is not None:
                 headers['X-Plex-Client-Identifier'] = target_uuid
-    if headers is None:
+    elif headers is None:
         headers = plex_server_response_headers(device)
     return Response(content=content,
                     status_code=status_code,
                     headers=headers)
 
 
-def _apply_stored_audio_settings():
-    """Apply persisted audio transcode thresholds to the runtime settings.
-
-    Without this, values saved via /api/audio-settings are silently
-    replaced by the class defaults on every restart.
-    """
+def _apply_stored_audio_settings() -> None:
     stored = settings.datastore.get_audio_settings()
     object.__setattr__(settings, 'audio_transcode_threshold_kbps',
                        stored.get("bitrate_kbps") if stored.get("bitrate_kbps") else None)
@@ -243,14 +251,12 @@ def _apply_stored_audio_settings():
                 stored.get("bitrate_kbps"), stored.get("sample_rate_hz"))
 
 
-@s.on_event("startup")
-async def on_startup():
+async def on_startup() -> None:
     from sonoplay.core.logging import apply_log_level
 
     apply_log_level(settings.log_level)
     logging.getLogger("uvicorn.access").addFilter(SuppressNoisyHTTPLogsFilter())
     _apply_stored_audio_settings()
-    # Create HTTP session with default timeout
     timeout = aiohttp.ClientTimeout(
         total=settings.http_timeout_default,
         connect=settings.http_timeout_connect
@@ -265,11 +271,9 @@ async def on_startup():
     _startup_time = time.time()
 
 
-@s.on_event("shutdown")
-async def on_shutdown():
+async def on_shutdown() -> None:
     await sub_man.stop_cleanup_task()
     sub_man.stop()
-    # Stop all GDM instances to release UDP sockets
     for gdm in _gdm_instances:
         try:
             gdm.stop()
@@ -279,14 +283,11 @@ async def on_shutdown():
     stop_tasks = []
     for device in devices:
         adapter = await adapter_by_device(device)
-        # Only stop playback this bridge started (it has an active queue);
-        # don't silence speakers playing from other sources on restart.
         if adapter.queue is not None:
             stop_tasks.append(adapter.stop())
         stop_tasks.append(device.remove_self())
     await asyncio.gather(*stop_tasks)
-    if g.http:
-        await g.http.close()
+    await g.close_http()
 
 
 @s.get("/health")
@@ -348,22 +349,19 @@ async def api_plex_disconnect():
 
 
 @s.get("/")
-async def link_page(request: Request):
-    # The template renders client-side from /api/devices; building the
-    # device list here (including plex.tv PIN fetches per unlinked device)
-    # only delayed first paint.
+async def link_page(request: Request) -> Response:
     await guess_host_ip(request)
     return templates.TemplateResponse(
+        request,
         "discovered_devices.html",
         {
-            'request': request,
             'onboarding_enabled': settings.enable_onboarding_wizard,
             'active_page': 'devices'
         }
     )
 
 
-def _virtual_device_error_to_http(exc: Exception) -> None:
+def _virtual_device_error_to_http(exc: Exception) -> NoReturn:
     if isinstance(exc, CapabilityMismatchError):
         raise HTTPException(
             status_code=400,
@@ -388,12 +386,12 @@ def _virtual_device_error_to_http(exc: Exception) -> None:
 
 
 @s.get("/virtual-devices")
-async def virtual_devices_page(request: Request):
+async def virtual_devices_page(request: Request) -> Response:
     await guess_host_ip(request)
     return templates.TemplateResponse(
+        request,
         "virtual_devices.html",
         {
-            "request": request,
             "onboarding_enabled": settings.enable_onboarding_wizard,
             "active_page": "groups"
         }
@@ -417,7 +415,7 @@ async def api_get_onboarding_state():
     stored_devices = len(settings.datastore.get_all_device_uuids())
     user_configured_devices = _count_user_configured_devices()
     virtual_device_count = len(list_virtual_devices())
-    eligible = bool(
+    eligible = (
         enabled
         and not state.get("completed")
         and user_configured_devices == 0
@@ -456,7 +454,7 @@ async def api_update_onboarding_state(payload: OnboardingStateUpdate):
     stored_devices = len(settings.datastore.get_all_device_uuids())
     user_configured_devices = _count_user_configured_devices()
     virtual_device_count = len(list_virtual_devices())
-    eligible = bool(
+    eligible = (
         settings.enable_onboarding_wizard
         and not state.get("completed")
         and user_configured_devices == 0
@@ -646,12 +644,14 @@ async def api_devices(request: Request):
 
 
 @s.post("/")
-async def link_device(request: Request,
-                      name: str = Form(default=None),
-                      uuid: str = Form(...),
-                      pin_id: str = Form(default=None),
-                      relink: str = Form(default=None),
-                      check_status: str = Form(default=None)):
+async def link_device(
+    request: Request,
+    name: str | None = Form(default=None),
+    uuid: str = Form(...),
+    pin_id: str | None = Form(default=None),
+    relink: str | None = Form(default=None),
+    check_status: str | None = Form(default=None),
+) -> Any:
     require_valid_uuid(uuid)
     device = await get_device_by_uuid(uuid)
     if device is None:
@@ -721,15 +721,16 @@ async def link_device(request: Request,
 
 
 @s.api_route("/dlna/callback/{uuid}", methods=["NOTIFY"])
-async def dlna_subscribe(request: Request, uuid: str):
+async def dlna_subscribe(request: Request, uuid: str) -> str:
     require_valid_uuid(uuid)
-    adapter = await adapter_by_device(await get_device_by_uuid(uuid))
+    device = await get_device_by_uuid(uuid)
+    if device is None:
+        return ""
+    adapter = await adapter_by_device(device)
     b = await request.body()
     info = xml2dict(b)
-    # Some renderers send events without a LastChange variable (the OPPO
-    # does after each SUBSCRIBE). There's nothing to update then.
     prop = info.propertyset.property if info.propertyset else None
-    if adapter is not None and isinstance(prop, dict) and prop.get("LastChange"):
+    if isinstance(prop, dict) and prop.get("LastChange"):
         adapter.update_state(info)
     return ""
 
@@ -893,13 +894,15 @@ async def skip_to(commandID: int,
 
 
 @s.get("/player/playback/setParameters")
-async def set_parameters(commandID: int,
-                         type_: str = Query("music", alias="type"),
-                         shuffle: int = None,
-                         repeat: int = None,
-                         volume: float = None,
-                         target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
-                         client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+async def set_parameters(
+    commandID: int,
+    type_: str = Query("music", alias="type"),
+    shuffle: int | None = None,
+    repeat: int | None = None,
+    volume: float | None = None,
+    target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+    client_uuid: str = Header(None, alias="x-plex-client-identifier"),
+) -> Response:
     require_valid_uuid(target_uuid)
     sub_man.update_command_id(target_uuid, client_uuid, commandID)
     if type_ == 'music':
@@ -909,7 +912,7 @@ async def set_parameters(commandID: int,
         adapter = await adapter_by_device(device)
         if shuffle is not None:
             adapter.shuffle = shuffle
-        if repeat is not None:
+        if repeat is not None and adapter.queue is not None:
             adapter.queue.repeat = repeat
         if volume is not None:
             await adapter.set_volume(int(volume))
@@ -961,17 +964,21 @@ async def timeline_poll(request: Request,
 
 
 @s.get("/player/timeline/subscribe")
-async def subscribe(request: Request,
-                    commandID: int,
-                    port: int,
-                    protocol: str = "http",
-                    target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
-                    client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+async def subscribe(
+    request: Request,
+    commandID: int,
+    port: int,
+    protocol: str = "http",
+    target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+    client_uuid: str = Header(None, alias="x-plex-client-identifier"),
+) -> Response:
     require_valid_uuid(target_uuid)
     await guess_host_ip(request)
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404, f"device not found {target_uuid}")
+    if request.client is None:
+        raise HTTPException(400, "missing client address")
     await sub_man.add_subscriber(target_uuid, client_uuid, request.client.host, port, protocol=protocol, command_id=commandID)
     return await build_response(XML_OK, target_uuid=target_uuid)
 
@@ -997,7 +1004,7 @@ async def resources(request: Request, target_uuid: str = Header(None, alias="x-p
         raise HTTPException(404, f"no device {target_uuid}")
     logger.debug("resource for %s", device.name)
     res = "<MediaContainer>"
-    res += f'<Player title="{xml_escape(str(device.name), quote=True)}" protocol="plex" protocolVersion="1" ' \
+    res += f'<Player title="{xml_escape(device.name, quote=True)}" protocol="plex" protocolVersion="1" ' \
            f'protocolCapabilities="timeline,playback,playqueues" ' \
            f'machineIdentifier="{device.uuid}" product="{device.model}" ' \
            f'platform="{settings.platform}" ' \
@@ -1034,11 +1041,11 @@ class SuppressNoisyHTTPLogsFilter(logging.Filter):
         return not (method == "NOTIFY" and path.startswith("/dlna/callback/"))
 
 
-def start_plex_server(port=None):
+def start_plex_server(port: int | None = None) -> None:
     if port is None:
         port = settings.http_port
-    
-    return uvicorn.run("plex:plex_server", host="0.0.0.0", port=port)
+
+    uvicorn.run("plex:plex_server", host="0.0.0.0", port=port)
 
 
 if __name__ == "__main__":

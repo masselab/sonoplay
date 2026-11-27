@@ -1,14 +1,19 @@
 import asyncio
-import logging
+from datetime import datetime, timedelta, timezone
 from html import escape as html_escape
+import logging
+from typing import Any
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
-from plex.adapters import adapter_by_device
-from utils import subscriber_send_headers, pms_header, g
-from settings import settings
 from dlna import devices, get_device_by_uuid, list_virtual_devices
-from datetime import datetime, timedelta, timezone
+from dlna.dlna_device import DlnaDevice
+from dlna.virtual.devices import VirtualDlnaDevice
+from plex.adapters import adapter_by_device
+from settings import settings
+from utils import g, pms_header, subscriber_send_headers
 
 TIMELINE_STOPPED = '<MediaContainer commandID="{command_id}">' \
                    '<Timeline type="music" state="stopped"/>' \
@@ -31,14 +36,14 @@ TIMELINE_PLAYING = '<MediaContainer commandID="{command_id}"><Timeline controlla
                    'state="stopped"/></MediaContainer> '
 
 
-class SubscribeManager(object):
-    subscribers = {}
-    running = True
-    last_server_notify_state = {}
+class SubscribeManager:
+    subscribers: dict[str, list["Subscriber"]] = {}
+    running: bool = True
+    last_server_notify_state: dict[str, str] = {}
+    _cleanup_task: asyncio.Task[None] | None = None
 
     @property
-    def subscriber_ttl_seconds(self):
-        """Get TTL from settings for testability."""
+    def subscriber_ttl_seconds(self) -> int:
         return settings.subscriber_ttl_seconds
 
     def cleanup_stale_subscribers(self) -> int:
@@ -90,13 +95,13 @@ class SubscribeManager(object):
             if removed > 0:
                 logger.info("Cleaned up %d stale subscriber(s)", removed)
 
-    def get_subscriber(self, target_uuid: str, client_uuid: str):
+    def get_subscriber(self, target_uuid: str, client_uuid: str) -> "Subscriber | None":
         s = [s for s in self.subscribers.get(target_uuid, []) if s.uuid == client_uuid]
         if len(s) > 0:
             return s[0]
         return None
 
-    def update_command_id(self, target_uuid: str, client_uuid: str, command_id: int):
+    def update_command_id(self, target_uuid: str, client_uuid: str, command_id: int) -> None:
         s = self.get_subscriber(target_uuid, client_uuid)
         if s is not None:
             s.command_id = command_id
@@ -107,7 +112,7 @@ class SubscribeManager(object):
                        host: str,
                        port: int,
                        protocol: str = "http",
-                       command_id: int = 0):
+                       command_id: int = 0) -> None:
         logger.info("add sub %s to %s", client_uuid, target_uuid)
         s = self.get_subscriber(target_uuid, client_uuid)
         if s is not None:
@@ -120,34 +125,34 @@ class SubscribeManager(object):
         l.append(Subscriber(client_uuid, host, port, self, protocol, command_id))
         self.subscribers[target_uuid] = l
 
-    async def remove_subscriber(self, uuid, target_uuid: str = None):
+    async def remove_subscriber(self, uuid: str, target_uuid: str | None = None) -> None:
         logger.info("remove sub %s from %s", uuid, target_uuid)
-        for tu in [target_uuid] if target_uuid is not None else self.subscribers.keys():
+        for tu in [target_uuid] if target_uuid is not None else list(self.subscribers.keys()):
             l = self.subscribers.get(tu, [])
             remove = None
             for s in l:
                 if s.uuid == uuid:
                     remove = s
                     break
-            if remove in l:
+            if remove is not None and remove in l:
                 l.remove(remove)
             if len(l) == 0:
                 device = await get_device_by_uuid(tu)
-                if device is not None and len(self.subscribers.get(tu, [])) == 0 and hasattr(device, "stop_subscribe"):
+                if device is not None and len(self.subscribers.get(tu, [])) == 0 and isinstance(device, DlnaDevice):
                     device.stop_subscribe()
 
-    def stop(self):
+    def stop(self) -> None:
         self.running = False
 
-    async def notify_server(self):
-        target_devices = list(devices)
+    async def notify_server(self) -> None:
+        target_devices: list[DlnaDevice | VirtualDlnaDevice] = list(devices)
         target_devices.extend(list_virtual_devices())
         await asyncio.gather(
             *[self.notify_server_device(device) for device in target_devices],
             return_exceptions=True,
         )
 
-    async def notify_server_device(self, device, force=False):
+    async def notify_server_device(self, device: DlnaDevice | VirtualDlnaDevice, force: bool = False) -> None:
         subs = self.subscribers.get(device.uuid, [])
         if len(subs) == 0 and not force:
             return
@@ -179,14 +184,14 @@ class SubscribeManager(object):
         except Exception as e:
             logger.warning("notify server failed for %s: %s", device.name, e)
 
-    async def notify(self):
+    async def notify(self) -> None:
         await self.notify_server()
-        target_devices = list(devices)
+        target_devices: list[DlnaDevice | VirtualDlnaDevice] = list(devices)
         target_devices.extend(list_virtual_devices())
         tasks = [self.notify_device(device) for device in target_devices]
         await asyncio.gather(*tasks)
 
-    async def msg_for_device(self, device):
+    async def msg_for_device(self, device: DlnaDevice | VirtualDlnaDevice) -> str | None:
         adapter = await adapter_by_device(device)
         if adapter.no_notice:
             return None
@@ -196,15 +201,13 @@ class SubscribeManager(object):
         if not state or state.get('state', None) is None:
             return TIMELINE_STOPPED
         state['itemType'] = 'music'
-        # Filter out None values before building XML
         filtered_state = {k: v for k, v in state.items() if v is not None}
-        # Escape XML special characters in string values
-        escaped_state = {k: html_escape(str(v)) if isinstance(v, str) else v for k, v in filtered_state.items()}
+        escaped_state = {k: html_escape(v) if isinstance(v, str) else v for k, v in filtered_state.items()}
         xml = TIMELINE_PLAYING.format(parameters=" ".join([f'{k}="{v}"' for k, v in escaped_state.items()]),
                                       command_id="{command_id}")
         return xml
 
-    async def notify_device(self, device):
+    async def notify_device(self, device: DlnaDevice | VirtualDlnaDevice) -> None:
         subs = self.subscribers.get(device.uuid, [])
         adapter = await adapter_by_device(device)
         if adapter.no_notice:
@@ -215,12 +218,10 @@ class SubscribeManager(object):
             return
         await asyncio.gather(*[sub.send(msg, device) for sub in subs])
 
-    async def notify_device_disconnected(self, device):
+    async def notify_device_disconnected(self, device: DlnaDevice | VirtualDlnaDevice) -> None:
         subs = self.subscribers.get(device.uuid, [])
         await asyncio.gather(*[sub.send(TIMELINE_DISCONNECTED, device) for sub in subs])
-        # Remove subscribers in background — await the gather wrapped in a coroutine
-        # (asyncio.gather returns a Future, which create_task rejects)
-        async def _cleanup():
+        async def _cleanup() -> None:
             await asyncio.gather(
                 *[self.remove_subscriber(sub.uuid, target_uuid=device.uuid) for sub in subs],
                 return_exceptions=True,
@@ -228,7 +229,7 @@ class SubscribeManager(object):
         task = asyncio.create_task(_cleanup())
         task.add_done_callback(lambda t: t.exception() if not t.cancelled() and t.exception() else None)
 
-    async def start(self):
+    async def start(self) -> None:
         await self.notify()
         while self.running:
             await asyncio.sleep(settings.plex_notify_interval)
@@ -269,11 +270,19 @@ class SubscribeManager(object):
                 logger.error("subscribe notify error: %s", e)
 
 
-class Subscriber(object):
+class Subscriber:
 
     MAX_SEND_ERRORS = 3
 
-    def __init__(self, uuid, host, port, manager: SubscribeManager, protocol: str = "http", command_id: int = 0):
+    def __init__(
+        self,
+        uuid: str,
+        host: str,
+        port: int,
+        manager: SubscribeManager,
+        protocol: str = "http",
+        command_id: int = 0,
+    ) -> None:
         self.uuid = uuid
         self.host = host
         self.port = port
@@ -284,12 +293,16 @@ class Subscriber(object):
         self.last_seen = datetime.now(timezone.utc)
         self.consecutive_errors = 0
 
-    async def send(self, msg: str, device):
+    async def send(self, msg: str, device: DlnaDevice | VirtualDlnaDevice) -> None:
         msg = msg.format(command_id=self.command_id)
         response = None
         try:
-            async with g.http.post(self.url, data=msg, headers=subscriber_send_headers(device),
-                                   timeout=1) as response:
+            async with g.http.post(
+                self.url,
+                data=msg,
+                headers=subscriber_send_headers(device),
+                timeout=aiohttp.ClientTimeout(total=1),
+            ) as response:
                 response.raise_for_status()
                 self.consecutive_errors = 0
         except Exception as e:
@@ -308,10 +321,12 @@ class Subscriber(object):
                 logger.debug("subscriber send error %s (attempt %d/%d): %s",
                              self, self.consecutive_errors, self.MAX_SEND_ERRORS, e)
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Subscriber):
+            return NotImplemented
         return self.uuid == other.uuid
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.host}:{self.port}"
 
 

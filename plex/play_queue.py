@@ -1,47 +1,50 @@
 import logging
+import math
+from typing import Any, TYPE_CHECKING
 
 from dotmap import DotMap
-from starlette.datastructures import URL, QueryParams
-import math
+from starlette.datastructures import QueryParams, URL
+
+if TYPE_CHECKING:
+    from plex.adapters import PlexLib
 
 logger = logging.getLogger(__name__)
 
-from utils import g, build_didl_lite_metadata, mime_type_for_container, DEFAULT_AUDIO_MIME_TYPE
 from settings import settings
+from utils import DEFAULT_AUDIO_MIME_TYPE, build_didl_lite_metadata, g, mime_type_for_container
 
 UNLIMITED = math.inf
 
 MIN_QUEUE_GAP = 25
 
 
-class PlayQueue(object):
+class PlayQueue:
 
     @classmethod
-    def from_url(cls, url):
+    def from_url(cls, url: str) -> "PlayQueue":
         from plex.adapters import PlexLib
-        url = URL(url)
+        parsed = URL(url)
         plex_lib = PlexLib()
-        plex_lib.protocol = url.scheme
-        plex_lib.address = url.hostname
-        plex_lib.port = url.port
-        q = QueryParams(url.query)
-        plex_lib.token = q.get("X-Plex-Token")
-        return PlayQueue(url.path + "?" + url.remove_query_params("X-Plex-Token").query,
+        plex_lib.protocol = parsed.scheme
+        plex_lib.address = parsed.hostname or ""
+        plex_lib.port = str(parsed.port) if parsed.port is not None else ""
+        q = QueryParams(parsed.query)
+        plex_lib.token = q.get("X-Plex-Token") or ""
+        return PlayQueue(parsed.path + "?" + parsed.remove_query_params("X-Plex-Token").query,
                          plex_lib)
 
-    def __init__(self, container_key, plex_lib):
+    def __init__(self, container_key: str, plex_lib: "PlexLib") -> None:
         self.container_key = container_key
         self.plex_lib = plex_lib
-        self.info = None
-        self.start_offset = None
+        self.info: DotMap | None = None
+        self.start_offset: int | None = None
         self.repeat = 0
 
     def _fetch_key(self) -> str:
-        # Strip `own=1` — Plex enforces client-id ownership which won't match ours
         key = URL("http://x" + self.container_key).remove_query_params("own")
         return key.path + ("?" + key.query if key.query else "")
 
-    async def get_info(self):
+    async def get_info(self) -> DotMap:
         if self.info is None:
             url = self.plex_lib.build_url(self._fetch_key())
             logger.debug("get queue %s", url)
@@ -54,10 +57,11 @@ class PlayQueue(object):
                         break
         return self.info
 
-    async def refresh_queue(self, playQueueID):
-        if playQueueID != self.info.playQueueID:
-            logger.debug("refresh to a different queue? %s -> %s", self.info.playQueueID, playQueueID)
-            self.container_key = str(self.container_key).replace(str(self.info.playQueueID), str(playQueueID), 1)
+    async def refresh_queue(self, playQueueID: Any) -> None:
+        current_info = await self.get_info()
+        if playQueueID != current_info.playQueueID:
+            logger.debug("refresh to a different queue? %s -> %s", current_info.playQueueID, playQueueID)
+            self.container_key = self.container_key.replace(str(current_info.playQueueID), str(playQueueID), 1)
         old_selected_item_id = await self.selected_item_id()
         old_selected_item_offset = await self.selected_offset()
         url = self.plex_lib.build_url(self._fetch_key())
@@ -101,7 +105,7 @@ class PlayQueue(object):
         self.info = info
         self.start_offset = start_offset
 
-    async def set_selected_offset(self, offset):
+    async def set_selected_offset(self, offset: int) -> None:
         total = await self.total_count()
         if not (0 <= offset < total):
             raise ValueError(f"Queue offset {offset} out of range [0, {total})")
@@ -126,7 +130,7 @@ class PlayQueue(object):
         info.playQueueSelectedItemOffset = offset
         info.playQueueSelectedItemID = selected_track.playQueueItemID
 
-    async def track(self, offset):
+    async def track(self, offset: int) -> Any:
         if self.info is None:
             await self.get_info()
         total = await self.total_count()
@@ -149,23 +153,23 @@ class PlayQueue(object):
         tracks = await self.available_tracks()
         return tracks[local_offset]
 
-    async def selected_track(self):
+    async def selected_track(self) -> Any:
         return await self.track(await self.selected_offset())
 
-    async def prev_track(self):
+    async def prev_track(self) -> Any:
         return await self.next_track(reverse=True)
 
-    async def next_track(self, reverse=False):
+    async def next_track(self, reverse: bool = False) -> Any:
         direction = -1 if reverse else 1
         return await self.track(await self.selected_offset() + direction)
 
-    async def select_track_key(self, key):
+    async def select_track_key(self, key: str) -> None:
         for idx, track in enumerate(await self.available_tracks()):
             if track.key == key:
-                await self.set_selected_offset(idx + self.start_offset)
+                await self.set_selected_offset(idx + (self.start_offset or 0))
                 break
 
-    def build_transcode_url(self, track):
+    def build_transcode_url(self, track: Any) -> str:
         """
         Build a Plex transcode URL that Sonos can play.
         
@@ -222,7 +226,7 @@ class PlayQueue(object):
     def _build_stream_url(self, resource: str) -> str:
         return self.plex_lib.build_url(resource, token=True)
 
-    def url_for_track(self, track, force_transcode=False):
+    def url_for_track(self, track: Any, force_transcode: bool = False) -> str:
         """
         Get the URL for a track, using transcoding if needed.
         
@@ -239,7 +243,7 @@ class PlayQueue(object):
         
         return self._build_stream_url(track.Media[0].Part[0].key)
 
-    def metadata_for_track(self, track, url, force_transcode=False):
+    def metadata_for_track(self, track: Any, url: str, force_transcode: bool = False) -> str:
         """
         Build DIDL-Lite CurrentURIMetaData for a track.
 
@@ -269,7 +273,7 @@ class PlayQueue(object):
             duration_ms=getattr(track, 'duration', None),
         )
 
-    def is_track_playable(self, track):
+    def is_track_playable(self, track: Any) -> bool:
         """
         Check if a track is playable based on bitrate/sample rate thresholds.
         Returns True if playable, False if it should be skipped.
@@ -302,30 +306,29 @@ class PlayQueue(object):
         except Exception:
             return True  # On error, assume playable
 
-    async def allow_shuffle(self):
+    async def allow_shuffle(self) -> bool:
         info = await self.get_info()
         if info.get("allowShuffle", None) is None:
             if (await self.total_count()) == UNLIMITED:
                 return False
             return True
-        return info.allowShuffle
+        return bool(info.allowShuffle)
 
     @property
-    def last_offset(self):
-        if self.start_offset is None:
+    def last_offset(self) -> int | None:
+        if self.start_offset is None or self.info is None:
             return None
         return self.start_offset + len(self.info.Metadata) - 1
 
-    async def more(self, after=True):
-        if self.info is None:
-            await self.get_info()
+    async def more(self, after: bool = True) -> bool:
+        current_info = await self.get_info()
         url = URL(self.plex_lib.build_url(self.container_key))
         url = url.remove_query_params(["center", "includeBefore", "includeAfter"])
-        args = {'includeAfter': 0, 'includeBefore': 0}
+        args: dict[str, Any] = {'includeAfter': 0, 'includeBefore': 0}
         if after:
             last_offset = self.last_offset
             total = await self.total_count()
-            if last_offset is None or last_offset >= total - 1:
+            if last_offset is None or self.start_offset is None or last_offset >= total - 1:
                 return False
             args['includeAfter'] = 1
             t = await self.track(self.start_offset + (await self.available_count()) - 1)
@@ -342,46 +345,46 @@ class PlayQueue(object):
             info = DotMap((await res.json())['MediaContainer'])
             new_items = list(getattr(info, 'Metadata', []))
             if after:
-                self.info.Metadata += new_items
+                current_info.Metadata += new_items
                 logger.debug("queue %s append %d items", self.container_key, len(new_items))
             else:
-                self.info.Metadata = new_items + self.info.Metadata
+                current_info.Metadata = new_items + current_info.Metadata
                 logger.debug("queue %s prepend %d items", self.container_key, len(new_items))
                 self.start_offset = max(0, self.start_offset - len(new_items))
         return len(new_items) > 0
 
-    async def available_tracks(self):
+    async def available_tracks(self) -> list[Any]:
         info = await self.get_info()
         return info.Metadata
 
-    async def available_count(self):
+    async def available_count(self) -> int:
         return len(await self.available_tracks())
 
-    async def total_count(self):
+    async def total_count(self) -> int | float:
         info = await self.get_info()
         if not info.playQueueTotalCount:
             return UNLIMITED
         return info.playQueueTotalCount
 
-    async def selected_item_id(self):
+    async def selected_item_id(self) -> Any:
         info = await self.get_info()
         return info.playQueueSelectedItemID
 
-    async def selected_offset(self):
+    async def selected_offset(self) -> int:
         info = await self.get_info()
         return info.playQueueSelectedItemOffset
 
-    async def get_track_info(self):
+    async def get_track_info(self) -> dict[str, Any]:
+        info_obj = await self.get_info()
         track = await self.selected_track()
         info = {
             'duration': track.duration,
             'key': track.key,
             'ratingKey': track.ratingKey,
-            'containerKey': f"/playQueues/{self.info.playQueueID}",
-            'playQueueID': self.info.playQueueID,
-            'playQueueVersion': self.info.playQueueVersion,
+            'containerKey': f"/playQueues/{info_obj.playQueueID}",
+            'playQueueID': info_obj.playQueueID,
+            'playQueueVersion': info_obj.playQueueVersion,
             'playQueueItemID': track.playQueueItemID,
-            # Extended metadata for UI
             'title': getattr(track, 'title', None),
             'artist': getattr(track, 'grandparentTitle', None),
             'album': getattr(track, 'parentTitle', None),

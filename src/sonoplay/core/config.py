@@ -4,12 +4,14 @@ This module provides the Settings class for application configuration,
 and the atomic_write_json utility for safe JSON file writes.
 """
 
-from pydantic_settings import BaseSettings
-from pathlib import Path
 from datetime import datetime, timezone
 import json
 import logging
 import os
+from pathlib import Path
+from typing import Any, Callable
+
+from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 
@@ -89,15 +91,15 @@ class Settings(BaseSettings):
     adapter_idle_interval: int = 60     # Seconds between state checks when idle
     pin_cache_max_size: int = 100       # Maximum cached Plex PIN login entries
 
-    def __init__(self, **values):
+    def __init__(self, **values: Any) -> None:
         super().__init__(**values)
         object.__setattr__(self, "_data_cache", None)
 
-    def dlna_name_alias(self, uuid: str, name: str, ip: str):
+    def dlna_name_alias(self, uuid: str, name: str, ip: str) -> str:
         data = self.load_data()
         alias = data.get(uuid, {}).get('alias', None)
         if alias is not None:
-            return alias
+            return str(alias)
         if not settings.aliases:
             return name
         aliases = settings.aliases.split(",")
@@ -107,48 +109,50 @@ class Settings(BaseSettings):
                 return v.strip()
         return name
 
-    def save_dlna_name_alias(self, uuid, alias):
+    def save_dlna_name_alias(self, uuid: str, alias: str) -> None:
         data = self.load_data()
         info = data.get(uuid, {})
         info['alias'] = alias
         data[uuid] = info
         self.save_data(data)
 
-    def load_data(self):
-        cache = getattr(self, "_data_cache", None)
+    def load_data(self) -> dict[str, Any]:
+        cache: dict[str, Any] | None = getattr(self, "_data_cache", None)
         if cache is not None:
             return cache
         p = Path(self.config_path).joinpath(self.data_file_name)
         p.parent.mkdir(parents=True, exist_ok=True)
         if not p.exists():
-            object.__setattr__(self, "_data_cache", {})
-            return self._data_cache
+            empty: dict[str, Any] = {}
+            object.__setattr__(self, "_data_cache", empty)
+            return empty
         try:
             with open(p) as f:
-                j = json.load(f)
-                object.__setattr__(self, "_data_cache", j)
-                return self._data_cache
+                loaded: dict[str, Any] = json.load(f)
+                object.__setattr__(self, "_data_cache", loaded)
+                return loaded
         except Exception:
-            object.__setattr__(self, "_data_cache", {})
-            return self._data_cache
+            fallback: dict[str, Any] = {}
+            object.__setattr__(self, "_data_cache", fallback)
+            return fallback
 
-    def save_data(self, data):
+    def save_data(self, data: dict[str, Any]) -> None:
         p = Path(self.config_path).joinpath(self.data_file_name)
         atomic_write_json(p, data)
         object.__setattr__(self, "_data_cache", data)
 
-    def get_token_for_uuid(self, uuid):
+    def get_token_for_uuid(self, uuid: str) -> str | None:
         d = self.load_data()
         return d.get(uuid, {}).get("token", None)
 
-    def set_token_for_uuid(self, uuid, token):
+    def set_token_for_uuid(self, uuid: str, token: str) -> None:
         d = self.load_data()
         info = d.get(uuid, {})
         info['token'] = token
         d[uuid] = info
         self.save_data(d)
 
-    def get_device_stats(self, uuid):
+    def get_device_stats(self, uuid: str) -> dict[str, Any]:
         data = self.load_data()
         info = data.get(uuid, {})
         stats = info.get("stats", {})
@@ -156,7 +160,7 @@ class Settings(BaseSettings):
         merged.update(stats)
         return merged
 
-    def _mutate_device_stats(self, uuid, mutator):
+    def _mutate_device_stats(self, uuid: str, mutator: Callable[[dict[str, Any]], None]) -> None:
         data = self.load_data()
         info = data.get(uuid, {})
         stats = info.get("stats", {})
@@ -167,28 +171,28 @@ class Settings(BaseSettings):
         data[uuid] = info
         self.save_data(data)
 
-    def update_device_stats(self, uuid, **kwargs):
-        def mutator(stats):
+    def update_device_stats(self, uuid: str, **kwargs: Any) -> None:
+        def mutator(stats: dict[str, Any]) -> None:
             for key, value in kwargs.items():
                 if isinstance(value, datetime):
                     value = value.isoformat()
                 stats[key] = value
         self._mutate_device_stats(uuid, mutator)
 
-    def increment_play_count(self, uuid):
-        def mutator(stats):
+    def increment_play_count(self, uuid: str) -> None:
+        def mutator(stats: dict[str, Any]) -> None:
             stats['play_count'] = stats.get('play_count', 0) + 1
             stats['status'] = 'playing'
             stats['last_seen'] = datetime.now(timezone.utc).isoformat()
         self._mutate_device_stats(uuid, mutator)
 
-    def add_play_duration_ms(self, uuid, delta_ms):
-        def mutator(stats):
-            stats['play_duration_ms'] = stats.get('play_duration_ms', 0) + max(0, int(delta_ms))
+    def add_play_duration_ms(self, uuid: str, delta_ms: int) -> None:
+        def mutator(stats: dict[str, Any]) -> None:
+            stats['play_duration_ms'] = stats.get('play_duration_ms', 0) + max(0, delta_ms)
             stats['last_seen'] = datetime.now(timezone.utc).isoformat()
         self._mutate_device_stats(uuid, mutator)
 
-    def mark_device_status(self, uuid, status):
+    def mark_device_status(self, uuid: str, status: str) -> None:
         self.update_device_stats(uuid, status=status, last_seen=datetime.now(timezone.utc))
 
 

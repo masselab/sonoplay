@@ -1,10 +1,13 @@
 """FastAPI application factory for Sonoplay."""
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from pathlib import Path
+import time
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pathlib import Path
-import time
 
 # Resolve paths relative to project root (where templates/ and static/ live)
 PROJECT_ROOT = Path(__file__).parent.parent.parent.parent
@@ -18,24 +21,25 @@ def create_app() -> FastAPI:
     Returns:
         Configured FastAPI instance with routes and middleware
     """
+    from sonoplay.api.routes.health import router as health_router, set_startup_time
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+        set_startup_time(time.time())
+        yield
+
     app = FastAPI(
         title="Sonoplay",
         description="Plex DLNA Player - Bridge Plex to DLNA/UPnP speakers",
         version="1.0.0",
+        lifespan=lifespan,
     )
-    
-    # Mount static files
+
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-    
-    # Register routers
-    from sonoplay.api.routes.health import router as health_router, set_startup_time
+
     app.include_router(health_router)
-    
-    @app.on_event("startup")
-    async def on_startup():
-        set_startup_time(time.time())
-    
+
     return app
 
 

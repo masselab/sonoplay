@@ -1,7 +1,9 @@
 import asyncio
+from collections.abc import Awaitable, Callable
 import logging
 import socket
 import time
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +24,7 @@ SEND_INTERVAL_SECS = 30
 RECENTLY_SEEN_THROTTLE_SECS = 60  # Ignore repeat announcements within this window
 
 
-def build_msearch(st: str):
+def build_msearch(st: str) -> str:
     params = [
         "M-SEARCH * HTTP/1.1",
         "HOST: {0}:{1}".format(SSDP_BROADCAST_ADDR, SSDP_BROADCAST_PORT),
@@ -35,34 +37,35 @@ def build_msearch(st: str):
     return "\r\n".join(params)
 
 
-def guess_local_ip():
+def guess_local_ip() -> str:
     if settings.host_ip and settings.host_ip not in ("0.0.0.0", "127.0.0.1"):
         return settings.host_ip
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("8.8.8.8", 80))
-            return s.getsockname()[0]
+            return str(s.getsockname()[0])
     except Exception:
         return "0.0.0.0"
 
 
-def get_protocol(discover):
+def get_protocol(discover: "DlnaDiscover") -> type[asyncio.DatagramProtocol]:
 
-    class DlnaProtocol(object):
+    class DlnaProtocol(asyncio.DatagramProtocol):
 
-        def __init__(self):
-            self.transport = None
+        def __init__(self) -> None:
+            self.transport: asyncio.DatagramTransport | None = None
             discover.protocol = self
-            self.is_connected = False
+            self.is_connected: bool = False
 
-        def connection_made(self, transport):
+        def connection_made(self, transport: asyncio.BaseTransport) -> None:
+            assert isinstance(transport, asyncio.DatagramTransport)
             self.transport = transport
             self.is_connected = True
             logger.info("dlna discover connected")
             asyncio.create_task(self.send_loop())
 
-        async def send_loop(self):
-            while self.is_connected:
+        async def send_loop(self) -> None:
+            while self.is_connected and self.transport is not None:
                 for st in SSDP_SEARCH_TARGETS:
                     msg = build_msearch(st)
                     self.transport.sendto(msg.encode("UTF-8"),
@@ -70,7 +73,7 @@ def get_protocol(discover):
                     await asyncio.sleep(0)
                 await asyncio.sleep(SEND_INTERVAL_SECS)
 
-        def datagram_received(self, data, addr):
+        def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
             try:
                 info = [a.split(":", 1)
                         for a in data.decode("UTF-8").split("\r\n")[1:]]
@@ -84,10 +87,10 @@ def get_protocol(discover):
                 return
             asyncio.create_task(discover.on_new_device(location))
 
-        def error_received(self, exc):
+        def error_received(self, exc: Exception) -> None:
             logger.error("Error received: %s", exc)
 
-        def connection_lost(self, exc):
+        def connection_lost(self, exc: Exception | None) -> None:
             logger.warning("Socket closed, stop the event loop")
             self.is_connected = False
             self.transport = None
@@ -95,39 +98,35 @@ def get_protocol(discover):
     return DlnaProtocol
 
 
-class DlnaDiscover(object):
+class DlnaDiscover:
 
-    def __init__(self, new_device_callback):
+    def __init__(self, new_device_callback: Callable[[str], Awaitable[Any]]) -> None:
         self.new_device_callback = new_device_callback
-        self.protocol = None
-        self.socket = None
-        self._pending_locations = set()
-        self._recently_seen_locations = {}  # location -> timestamp
+        self.protocol: asyncio.DatagramProtocol | None = None
+        self.socket: socket.socket | None = None
+        self._pending_locations: set[str] = set()
+        self._recently_seen_locations: dict[str, float] = {}
 
-    def _cleanup_recently_seen(self):
-        """Remove entries older than throttle window to prevent unbounded growth."""
+    def _cleanup_recently_seen(self) -> None:
         now = time.time()
         expired = [loc for loc, ts in self._recently_seen_locations.items()
                    if (now - ts) >= RECENTLY_SEEN_THROTTLE_SECS * 2]
         for loc in expired:
             del self._recently_seen_locations[loc]
 
-    async def on_new_device(self, location_url):
+    async def on_new_device(self, location_url: str | None) -> None:
         if not location_url:
             return
-        # Skip if currently being processed
         if location_url in self._pending_locations:
             return
-        # Skip if recently seen (time-based throttle)
         now = time.time()
         last_seen = self._recently_seen_locations.get(location_url)
         if last_seen is not None and (now - last_seen) < RECENTLY_SEEN_THROTTLE_SECS:
             return
-        
-        # Periodic cleanup to prevent unbounded growth
+
         if len(self._recently_seen_locations) > 100:
             self._cleanup_recently_seen()
-        
+
         self._pending_locations.add(location_url)
         self._recently_seen_locations[location_url] = now
         try:
@@ -135,7 +134,7 @@ class DlnaDiscover(object):
         finally:
             self._pending_locations.discard(location_url)
 
-    def init_socket(self):
+    def init_socket(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -161,24 +160,18 @@ class DlnaDiscover(object):
 
         self.socket.setblocking(False)
 
-    async def _location_url_retry_loop(self):
-        # Upstream loads LOCATION_URL exactly once at startup with no retry, so any
-        # transient blip (DLNA renderer standby/reboot/wifi) permanently drops the
-        # device until the container is restarted. Re-run discovery periodically;
-        # on_new_dlna_device() dedupes, so this is a no-op when the device is present
-        # and re-adds it when it has dropped. Pop the throttle entry first so a
-        # dropped device is re-added promptly rather than waiting out the window.
+    async def _location_url_retry_loop(self) -> None:
         while True:
             try:
-                self._recently_seen_locations.pop(settings.location_url, None)
-                await self.on_new_device(settings.location_url)
+                if settings.location_url:
+                    self._recently_seen_locations.pop(settings.location_url, None)
+                    await self.on_new_device(settings.location_url)
             except Exception as e:
                 logger.warning("location_url retry failed: %s", e)
             await asyncio.sleep(30)
 
-    async def discover(self, loop=None):
+    async def discover(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         if settings.location_url is not None and len(settings.location_url) > 0:
-            # background self-heal loop; return so startup isn't blocked
             asyncio.create_task(self._location_url_retry_loop(), name="location_url_retry")
             return
         self.init_socket()

@@ -1,8 +1,10 @@
 import asyncio
 import logging
 import socket
+from typing import Any
 
 from settings import settings
+from utils import PlexDeviceLike
 
 logger = logging.getLogger(__name__)
 
@@ -11,37 +13,38 @@ GDM_MULTICAST_PORT = 32413
 GDM_PORT = 32412
 
 
-def get_protocol(gdm):
+def get_protocol(gdm: "PlexGDM") -> type[asyncio.DatagramProtocol]:
 
-    class ClientProtocol(object):
+    class ClientProtocol(asyncio.DatagramProtocol):
 
-        def __init__(self):
-            self.transport = None
+        def __init__(self) -> None:
+            self.transport: asyncio.DatagramTransport | None = None
             gdm.protocol = self
             self.is_connected = False
 
-        def connection_made(self, transport):
+        def connection_made(self, transport: asyncio.BaseTransport) -> None:
+            assert isinstance(transport, asyncio.DatagramTransport)
             self.transport = transport
             self.is_connected = True
-            # print(f"gdm connected {gdm.device.name}")
             self.transport.sendto(f"HELLO * HTTP/1.0\n{gdm.client_data}".encode('utf8'),
                                   (GDM_MULTICAST_ADDR, GDM_MULTICAST_PORT))
 
-        def datagram_received(self, data, addr):
+        def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
             if data.decode("utf8").startswith("M-SEARCH * HTTP/1."):
                 if addr[0] == "127.0.0.1":
                     return
+                if self.transport is None:
+                    return
                 try:
                     msg = f"HTTP/1.0 200 OK\n{gdm.client_data}"
-                    # print(f"Reply {addr}, {gdm.device.name}")
                     self.transport.sendto(msg.encode('utf8'), addr)
                 except Exception as e:
                     logger.warning("unable to send client message: %s", e)
 
-        def error_received(self, exc):
+        def error_received(self, exc: Exception) -> None:
             logger.error("Error received: %s", exc)
 
-        def connection_lost(self, exc):
+        def connection_lost(self, exc: Exception | None) -> None:
             logger.warning("Socket closed, stop the event loop")
             self.is_connected = False
             self.transport = None
@@ -49,23 +52,16 @@ def get_protocol(gdm):
     return ClientProtocol
 
 
-class PlexGDM(object):
+class PlexGDM:
 
-    def __init__(self, device):
+    def __init__(self, device: PlexDeviceLike) -> None:
         self.server_port = settings.http_port
-        self.socket = None
-        self.protocol = None
+        self.socket: socket.socket | None = None
+        self.protocol: asyncio.DatagramProtocol | None = None
         self.device = device
 
-    # def notify_new_device(self, device):
-    #     if self.protocol is not None and self.protocol.is_connected:
-    #         for client_data in self.client_data(device=device):
-    #             print(f"send gdm device {device.name}")
-    #             self.protocol.transport.sendto(f"HELLO * HTTP/1.0\n{client_data}".encode('utf8'),
-    #                                           (GDM_MULTICAST_ADDR, GDM_MULTICAST_PORT))
-
     @property
-    def client_data(self):
+    def client_data(self) -> str:
         data = {
             "Name": self.device.name,
             "Port": str(self.server_port),
@@ -83,7 +79,7 @@ class PlexGDM(object):
             client_data += "%s: %s\n" % (key, value)
         return client_data
 
-    def init_socket(self):
+    def init_socket(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         try:
             try:
@@ -98,7 +94,6 @@ class PlexGDM(object):
                                    socket.inet_aton('0.0.0.0'))
             self.socket.setblocking(False)
         except Exception:
-            # Clean up socket on any failure
             if self.socket:
                 try:
                     self.socket.close()
@@ -107,16 +102,17 @@ class PlexGDM(object):
                 self.socket = None
             raise
 
-    def run(self, loop=None):
+    def run(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
         self.init_socket()
         if loop is None:
             loop = asyncio.get_running_loop()
         asyncio.create_task(loop.create_datagram_endpoint(get_protocol(self), sock=self.socket))
 
-    def stop(self):
-        if self.protocol and getattr(self.protocol, "transport", None):
+    def stop(self) -> None:
+        transport = getattr(self.protocol, "transport", None)
+        if transport is not None:
             try:
-                self.protocol.transport.close()
+                transport.close()
             except Exception as e:
                 logger.debug("Expected cleanup error closing transport: %s", e)
         if self.socket:
@@ -126,10 +122,3 @@ class PlexGDM(object):
                 logger.debug("Expected cleanup error closing socket: %s", e)
             self.socket = None
         self.protocol = None
-
-
-if __name__ == "__main__":
-    gdm = PlexGDM()
-    loop = asyncio.get_event_loop()
-    gdm.run(loop)
-    loop.run_forever()

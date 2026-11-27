@@ -235,7 +235,7 @@ class JSONDataStore(DataStore):
         def mutator(meta: Dict[str, Any]) -> None:
             onboarding = dict(meta.get("onboarding", {}))
             if completed is not None:
-                onboarding["completed"] = bool(completed)
+                onboarding["completed"] = completed
             if steps is not None:
                 onboarding["steps"] = dict(steps)
             if completed_at is not None:
@@ -251,7 +251,6 @@ class JSONDataStore(DataStore):
         audio = deepcopy(DEFAULT_AUDIO_SETTINGS)
         stored = meta.get("audio_settings", {})
         if isinstance(stored, dict):
-            # Only update keys that exist in defaults
             audio.update({k: v for k, v in stored.items() if k in audio})
         return audio
 
@@ -261,9 +260,9 @@ class JSONDataStore(DataStore):
         def mutator(meta: Dict[str, Any]) -> None:
             audio = dict(meta.get("audio_settings", {}))
             if bitrate_kbps is not None:
-                audio["bitrate_kbps"] = int(bitrate_kbps) if bitrate_kbps > 0 else None
+                audio["bitrate_kbps"] = bitrate_kbps if bitrate_kbps > 0 else None
             if sample_rate_hz is not None:
-                audio["sample_rate_hz"] = int(sample_rate_hz) if sample_rate_hz > 0 else None
+                audio["sample_rate_hz"] = sample_rate_hz if sample_rate_hz > 0 else None
             meta["audio_settings"] = audio
 
         self._mutate_meta(mutator)

@@ -19,18 +19,24 @@
 # (at your option) any later version.
 
 import asyncio
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
+from html import escape as xml_escape
 import logging
 import re
 import time
 import traceback
-from urllib.parse import urlparse, urljoin
-
-logger = logging.getLogger(__name__)
-from datetime import datetime, timedelta, timezone
-from html import escape as xml_escape
+from typing import Any, TYPE_CHECKING
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
-from aiohttp import ClientConnectorError, ClientConnectionError
+from aiohttp import ClientConnectionError, ClientConnectorError
+from dotmap import DotMap
+
+if TYPE_CHECKING:
+    from dlna.virtual.devices import VirtualDlnaDevice
+
+logger = logging.getLogger(__name__)
 
 from plex.adapters import remove_adapter
 from utils import xml2dict, escape_bare_ampersands, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g, extract_value
@@ -137,23 +143,19 @@ def sanitize_soap_response(xml: str) -> str:
     return xml
 
 
-# Device list and lock for thread-safe access
-devices = []
+devices: list["DlnaDevice"] = []
 devices_lock = asyncio.Lock()
 
 
-async def add_device(device) -> None:
-    """Add a device to the list with thread-safe locking."""
+async def add_device(device: "DlnaDevice") -> None:
     async with devices_lock:
-        # Check if device already exists
         for existing in devices:
             if existing.uuid == device.uuid:
-                return  # Already exists
+                return
         devices.append(device)
 
 
 async def remove_device(uuid: str) -> bool:
-    """Remove a device by UUID with thread-safe locking."""
     async with devices_lock:
         for i, device in enumerate(devices):
             if device.uuid == uuid:
@@ -162,16 +164,16 @@ async def remove_device(uuid: str) -> bool:
         return False
 
 
-def as_text(value, default=""):
+def as_text(value: Any, default: Any = "") -> str:
     extracted = extract_value(value, default)
     if extracted is None:
-        return default
+        return str(default)
     return str(extracted)
 
 
-class DlnaDeviceService(object):
+class DlnaDeviceService:
 
-    def __init__(self, service_dict: dict, device):
+    def __init__(self, service_dict: dict[str, Any], device: "DlnaDevice") -> None:
         self.service_type = as_text(service_dict.get('serviceType'))
         control_url = as_text(service_dict.get('controlURL'))
         event_url = as_text(service_dict.get('eventSubURL'))
@@ -182,29 +184,23 @@ class DlnaDeviceService(object):
         self.urn = self.service_type
         self.device = device
         self.subscribed = False
-        # Identity token of the currently-owning subscribe loop; prevents a
-        # woken older loop from running alongside a newly spawned one.
-        self.subscribe_loop_token = None
-        self._spec_info = None
-        self.next_subscribe_call_time = None
-        # Subscription expiry tracking for auto-renewal
+        self.subscribe_loop_token: object | None = None
+        self._spec_info: DotMap | None = None
+        self.next_subscribe_call_time: datetime | None = None
         self._subscription_expiry: datetime | None = None
         self._resubscribe_margin_seconds = 30
-        # Last UPnP error per action and whether SUBSCRIBE is failing, so
-        # errors that repeat on every poll or renewal are logged once.
-        self._last_errors = {}
+        self._last_errors: dict[str, str] = {}
         self._subscribe_failing = False
 
-    def payload_from_template(self, action: str, data: dict):
+    def payload_from_template(self, action: str, data: dict[str, Any]) -> str:
         fields = ''
         for tag, value in data.items():
-            # XML-escape values to handle & and other special chars in URLs
             escaped_value = xml_escape(as_text(value))
             fields += '<{tag}>{value}</{tag}>'.format(tag=tag, value=escaped_value)
         payload = PAYLOAD_FMT.format(action=action, urn=self.urn, fields=fields)
         return payload
 
-    def _try_parse_soap_fault(self, response_text: str, action: str):
+    def _try_parse_soap_fault(self, response_text: str, action: str) -> str | None:
         """Try to parse HTTP 500 response as a SOAP Fault.
         
         Per UPnP spec, SOAP Faults are delivered via HTTP 500. If the response
@@ -251,7 +247,7 @@ class DlnaDeviceService(object):
         
         return None  # Not a valid SOAP Fault - retry
 
-    async def control(self, action: str, data: dict, client: aiohttp.ClientSession = None):
+    async def control(self, action: str, data: Any, client: aiohttp.ClientSession | None = None) -> Any:
         headers = {
             'Content-Type': 'text/xml; charset="utf-8"',
             'SOAPACTION': '"{}#{}"'.format(self.urn, action),
@@ -288,7 +284,12 @@ class DlnaDeviceService(object):
         last_exception = None
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                async with client.post(self.control_url, data=payload.encode('utf8'), headers=headers, timeout=settings.http_timeout_dlna) as response:
+                async with client.post(
+                    self.control_url,
+                    data=payload.encode('utf8'),
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=settings.http_timeout_dlna),
+                ) as response:
                     # Check for 5xx errors - may be a valid SOAP Fault (per UPnP spec)
                     if 500 <= response.status < 600:
                         response_text = await response.text()
@@ -359,7 +360,7 @@ class DlnaDeviceService(object):
                     traceback.print_tb(e.__traceback__)
                 raise
 
-    async def subscribe(self, timeout_sec=None):
+    async def subscribe(self, timeout_sec: int | None = None) -> bool | None:
         if timeout_sec is None:
             # Check for device-specific quirk (e.g., HEOS 9-minute limit)
             from dlna.quirks import get_device_quirks
@@ -404,7 +405,7 @@ class DlnaDeviceService(object):
         margin = timedelta(seconds=self._resubscribe_margin_seconds)
         return datetime.now(timezone.utc) >= (self._subscription_expiry - margin)
 
-    async def get_spec(self, client: aiohttp.ClientSession = None):
+    async def get_spec(self, client: aiohttp.ClientSession | None = None) -> DotMap:
         if self._spec_info is not None:
             return self._spec_info
         if client is None:
@@ -416,45 +417,45 @@ class DlnaDeviceService(object):
             self._spec_info = info
         return self._spec_info
 
-    async def get_actions(self, client: aiohttp.ClientSession = None):
+    async def get_actions(self, client: aiohttp.ClientSession | None = None) -> list[Any]:
         spec = await self.get_spec(client=client)
         actions = spec['scpd']['actionList']['action']
         if not isinstance(actions, (list, tuple)):
             actions = [actions]
-        return actions
+        return list(actions)
 
-    async def get_action_spec(self, action_name, client: aiohttp.ClientSession = None):
+    async def get_action_spec(self, action_name: str, client: aiohttp.ClientSession | None = None) -> Any:
         for action in await self.get_actions(client=client):
             if as_text(action.get('name')) == action_name:
                 return action
         return None
 
-    async def get_state_variables(self):
+    async def get_state_variables(self) -> list[Any]:
         spec = await self.get_spec()
         vars = spec['scpd']['serviceStateTable']['stateVariable']
         if not isinstance(vars, (list, tuple)):
             vars = [vars]
-        return vars
+        return list(vars)
 
 
-class DlnaDevice(object):
+class DlnaDevice:
 
-    def __init__(self, location_url):
+    def __init__(self, location_url: str) -> None:
         self.location_url = location_url
-        self.name = None
-        self.manufacturer = None
-        self.model = None
-        self.ip = None
-        self.info = None
-        self.services = {}
-        self.volume_max = None
-        self.volume_min = None
-        self.volume_step = None
-        self.uuid = None
+        self.name: str = ""
+        self.manufacturer: str = ""
+        self.model: str = ""
+        self.ip: str = ""
+        self.info: DotMap | None = None
+        self.services: dict[str, DlnaDeviceService] = {}
+        self.volume_max: int = 100
+        self.volume_min: int = 0
+        self.volume_step: int = 1
+        self.uuid: str = ""
         self.loop = asyncio.get_running_loop()
         self.repeat_error_count = 0
 
-    async def get_data(self):
+    async def get_data(self) -> None:
         if self.info is None:
             async with g.http.get(self.location_url) as response:
                 if response.ok:
@@ -521,12 +522,12 @@ class DlnaDevice(object):
             if missing:
                 raise NotARendererError(f"{self.name} is not a media renderer (missing {', '.join(missing)})")
             url = urlparse(self.location_url)
-            self.ip = url.hostname
+            self.ip = url.hostname or ""
             self.name = settings.dlna_name_alias(self.uuid, self.name, self.ip)
             await self.get_volume_info()
             await asyncio.gather(*[s.get_spec() for s in self.services.values()])
 
-    async def _find_service_by_action(self, action):
+    async def _find_service_by_action(self, action: str) -> DlnaDeviceService | None:
         await self.get_data()
         for t, service in self.services.items():
             a = await service.get_action_spec(action)
@@ -534,12 +535,18 @@ class DlnaDevice(object):
                 return service
         return None
 
-    def __getattr__(self, item):
-        def action(data: dict = None, client: aiohttp.ClientSession = None):
+    def __getattr__(self, item: str) -> Callable[..., Awaitable[Any]]:
+        def action(data: Any = None, client: aiohttp.ClientSession | None = None) -> Awaitable[Any]:
             return self.action(item, data=data if data is not None else {}, client=client)
         return action
 
-    async def action(self, action: str, data: dict = None, service_type: str = None, client: aiohttp.ClientSession = None):
+    async def action(
+        self,
+        action: str,
+        data: Any = None,
+        service_type: str | None = None,
+        client: aiohttp.ClientSession | None = None,
+    ) -> Any:
         if data is None:
             data = {}
         await self.get_data()
@@ -554,10 +561,10 @@ class DlnaDevice(object):
                 raise Exception(f"action not found {action}")
         return await service.control(action, data, client=client)
 
-    def _get_service(self, service_type: str):
+    def _get_service(self, service_type: str) -> DlnaDeviceService | None:
         return self.services.get(service_type)
 
-    async def wait_for_can_play(self, client: aiohttp.ClientSession = None, max_wait: float = 5.0) -> bool:
+    async def wait_for_can_play(self, client: aiohttp.ClientSession | None = None, max_wait: float = 5.0) -> bool:
         """Wait until device can accept Play command.
         
         Some devices need time to transition states after SetAVTransportURI
@@ -602,26 +609,23 @@ class DlnaDevice(object):
         logger.debug("%s wait_for_can_play: timeout after %.1fs", self.name, max_wait)
         return False
 
-    async def subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE, timeout_sec=120):
+    async def subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE, timeout_sec: int = 120) -> bool | None:
         await self.get_data()
         service = self._get_service(service_type)
+        if service is None:
+            return False
         return await service.subscribe(timeout_sec=timeout_sec)
 
-    async def loop_subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE, timeout_sec=120):
+    async def loop_subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE, timeout_sec: int = 120) -> None:
         service = self._get_service(service_type)
-        if service.subscribed:
+        if service is None or service.subscribed:
             return
         service.subscribed = True
-        # Take ownership: if stop_subscribe ran while an older loop slept and
-        # a new loop was spawned meanwhile, the older loop must not resume
-        # when it sees subscribed flipped back to True.
         token = object()
         service.subscribe_loop_token = token
-        # An unreachable device fails every retry the same way; log the
-        # first failure and then only changes, until a subscribe succeeds.
-        last_error = None
+        last_error: str | None = None
 
-        def log_error(kind, exc):
+        def log_error(kind: str, exc: Exception) -> None:
             nonlocal last_error
             message = f"{kind}: {str(exc) or exc.__class__.__name__}"
             logger.log(logging.DEBUG if message == last_error else logging.WARNING,
@@ -648,17 +652,19 @@ class DlnaDevice(object):
                     break
                 await asyncio.sleep(min(timeout_sec, 10))
 
-    def stop_subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE):
+    def stop_subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE) -> None:
         service = self._get_service(service_type)
         if service:
             service.subscribed = False
 
-    async def get_volume_info(self):
+    async def get_volume_info(self) -> None:
         await self.get_data()
         self.volume_min = 0
         self.volume_max = 100
         self.volume_step = 1
         service = self._get_service(UPNP_RC_SERVICE_TYPE)
+        if service is None:
+            return
         try:
             vars = await service.get_state_variables()
             for v in vars:
@@ -673,9 +679,8 @@ class DlnaDevice(object):
         except Exception:
             logger.exception("Unexpected error parsing volume range")
 
-    async def remove_self(self):
+    async def remove_self(self) -> None:
         async with devices_lock:
-            # A delayed removal must leave a rediscovered instance alone.
             for index, device in enumerate(devices):
                 if device is self:
                     del devices[index]
@@ -685,8 +690,6 @@ class DlnaDevice(object):
         from plex.adapters import adapters, remove_adapter
         from plex.subscribe import sub_man
         self.stop_subscribe()
-        # Don't use adapter_by_device() here: it would create a fresh
-        # adapter (and a new polling loop) for a device we're removing.
         adapter = adapters.get(self.uuid)
         if adapter is not None and adapter.dlna is self:
             adapter.state.state = "STOPPED"
@@ -695,31 +698,27 @@ class DlnaDevice(object):
             adapter.queue = None
             await remove_adapter(adapter)
         settings.mark_device_status(self.uuid, "offline")
-        # Plexamp receives an explicit disconnected timeline. The PMS timeline
-        # has no active state to send once the adapter is stopped.
         await sub_man.notify_device_disconnected(self)
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return " ".join(["DLNA Device", self.name, self.ip])
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DlnaDevice):
+            return NotImplemented
         return self.uuid == other.uuid
 
 
-# if settings.location_url is not None:
-#     devices.append(DlnaDevice(settings.location_url))
-
-
-async def get_device_data():
+async def get_device_data() -> None:
     async with devices_lock:
         device_list = list(devices)
     await asyncio.gather(*[device.get_data() for device in device_list])
 
 
-async def get_device_by_uuid(uuid):
+async def get_device_by_uuid(uuid: str) -> "DlnaDevice | VirtualDlnaDevice | None":
     async with devices_lock:
         for device in devices:
             if device.uuid == uuid:

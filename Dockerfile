@@ -1,59 +1,59 @@
+# syntax=docker/dockerfile:1
+
 FROM python:3.12-slim AS builder
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
 WORKDIR /app
 
-# Install build dependencies in builder stage
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        build-essential \
-        gcc \
-        python3-dev \
-    && rm -rf /var/lib/apt/lists/*
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0 \
+    UV_NO_CACHE=1
 
-# Install Python dependencies
-COPY pyproject.toml requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies first for optimal layer caching
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
 
-# Copy source and install package
+# Install the local package (non-editable so the venv is self-contained)
 COPY src/ src/
-RUN pip install --no-cache-dir .
+RUN uv sync --frozen --no-dev --no-editable
 
-# --- Final stage: slim runtime image ---
+# --- Final stage: minimal slim runtime ---
 FROM python:3.12-slim
 
 WORKDIR /app
 
-# Create non-root user
-RUN groupadd -r sonoplay && useradd -r -g sonoplay -d /app -s /sbin/nologin sonoplay
+# Create non-root user (UID/GID 999) and strip unused build/packaging stdlib bloat
+RUN groupadd -r -g 999 sonoplay \
+    && useradd -r -u 999 -g sonoplay -d /app -s /sbin/nologin sonoplay \
+    && mkdir -p /config \
+    && chown sonoplay:sonoplay /config \
+    && rm -rf /usr/local/lib/python3.12/ensurepip \
+              /usr/local/lib/python3.12/idlelib \
+              /usr/local/lib/python3.12/tkinter \
+              /usr/local/lib/python3.12/site-packages/pip* \
+              /usr/local/bin/pip*
 
-# Copy installed packages from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy self-contained venv and application code directly with final ownership
+# (avoids a separate `chown -R` layer that would double the image size)
+COPY --from=builder --chown=999:999 /app/.venv /app/.venv
+COPY --chown=999:999 templates/ templates/
+COPY --chown=999:999 static/ static/
+COPY --chown=999:999 main.py logging_config.py version.py ./
+COPY --chown=999:999 plex/ plex/
+COPY --chown=999:999 dlna/ dlna/
+COPY --chown=999:999 settings/ settings/
+COPY --chown=999:999 utils/ utils/
 
-# Copy application code
-COPY templates/ templates/
-COPY static/ static/
-COPY main.py logging_config.py version.py ./
-COPY plex/ plex/
-COPY dlna/ dlna/
-COPY settings/ settings/
-COPY utils/ utils/
-COPY src/ src/
+ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    HTTP_PORT=32488 \
+    CONFIG_PATH=/config
 
-# Set ownership
-RUN chown -R sonoplay:sonoplay /app
-
-# Pre-create config directory with correct ownership so that
-# atomic_write_json can create temp files in it.
-# Must come BEFORE the VOLUME declaration so Docker preserves
-# the ownership when creating an empty volume at runtime.
-RUN mkdir -p /config && chown sonoplay:sonoplay /config
-
-ENV HTTP_PORT=32488 CONFIG_PATH=/config
 EXPOSE 1910/udp 32412/udp $HTTP_PORT
 VOLUME /config
 
-# Switch to non-root user
 USER sonoplay
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

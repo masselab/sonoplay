@@ -5,7 +5,7 @@
 
 # Build-stage: dependency install
 !pyproject.toml
-!requirements.txt
+!uv.lock
 
 # Build-stage: package install
 !src/

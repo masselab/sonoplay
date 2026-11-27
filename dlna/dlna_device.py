@@ -19,7 +19,6 @@
 # (at your option) any later version.
 
 import asyncio
-import os
 import logging
 import re
 import time
@@ -378,7 +377,7 @@ class DlnaDeviceService(object):
             'Cache-Control': 'no-cache',
             'User-Agent': 'SonoPlay/1.0',
             'NT': 'upnp:event',
-            'Callback': '<http://' + (os.environ.get('DLNA_CALLBACK_HOST') or settings.host_ip) + ':' + str(settings.http_port) + '/dlna/callback/'
+            'Callback': '<http://' + (settings.dlna_callback_host or settings.host_ip) + ':' + str(settings.http_port) + '/dlna/callback/'
                         + self.device.uuid + '>',
             'Timeout': f'Second-{timeout_sec}'
         }

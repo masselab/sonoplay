@@ -161,9 +161,25 @@ class DlnaDiscover(object):
 
         self.socket.setblocking(False)
 
+    async def _location_url_retry_loop(self):
+        # Upstream loads LOCATION_URL exactly once at startup with no retry, so any
+        # transient blip (DLNA renderer standby/reboot/wifi) permanently drops the
+        # device until the container is restarted. Re-run discovery periodically;
+        # on_new_dlna_device() dedupes, so this is a no-op when the device is present
+        # and re-adds it when it has dropped. Pop the throttle entry first so a
+        # dropped device is re-added promptly rather than waiting out the window.
+        while True:
+            try:
+                self._recently_seen_locations.pop(settings.location_url, None)
+                await self.on_new_device(settings.location_url)
+            except Exception as e:
+                logger.warning("location_url retry failed: %s", e)
+            await asyncio.sleep(30)
+
     async def discover(self, loop=None):
         if settings.location_url is not None and len(settings.location_url) > 0:
-            await self.on_new_device(settings.location_url)
+            # background self-heal loop; return so startup isn't blocked
+            asyncio.create_task(self._location_url_retry_loop(), name="location_url_retry")
             return
         self.init_socket()
         if loop is None:

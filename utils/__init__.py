@@ -205,6 +205,7 @@ def build_didl_lite_metadata(
     upnp_class: str = "object.item.audioItem.musicTrack",
     artist: str | None = None,
     album: str | None = None,
+    album_art_uri: str | None = None,
     duration_ms: int | str | None = None,
 ) -> str:
     """Build a minimal DIDL-Lite document for use as CurrentURIMetaData."""
@@ -219,6 +220,11 @@ def build_didl_lite_metadata(
     creator_tag = f"<dc:creator>{esc(artist)}</dc:creator>" if artist else ""
     artist_tag = f"<upnp:artist>{esc(artist)}</upnp:artist>" if artist else ""
     album_tag = f"<upnp:album>{esc(album)}</upnp:album>" if album else ""
+    album_art_tag = (
+        f"<upnp:albumArtURI>{esc(album_art_uri)}</upnp:albumArtURI>"
+        if album_art_uri
+        else ""
+    )
 
     return (
         '<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
@@ -226,7 +232,7 @@ def build_didl_lite_metadata(
         'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
         f'<item id="{esc(item_id) or "0"}" parentID="-1" restricted="1">'
         f'<dc:title>{esc(title)}</dc:title>'
-        f'{creator_tag}{artist_tag}{album_tag}'
+        f'{creator_tag}{artist_tag}{album_tag}{album_art_tag}'
         f'<upnp:class>{esc(upnp_class)}</upnp:class>'
         f'<res protocolInfo="http-get:*:{esc(mime_type)}:*"{duration_attr}>{esc(url)}</res>'
         '</item>'

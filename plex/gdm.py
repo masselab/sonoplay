@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import socket
-from typing import Any
+from typing import Any, cast
 
 from settings import settings
 from utils import PlexDeviceLike
@@ -23,8 +23,7 @@ def get_protocol(gdm: "PlexGDM") -> type[asyncio.DatagramProtocol]:
             self.is_connected = False
 
         def connection_made(self, transport: asyncio.BaseTransport) -> None:
-            assert isinstance(transport, asyncio.DatagramTransport)
-            self.transport = transport
+            self.transport = cast(asyncio.DatagramTransport, transport)
             self.is_connected = True
             self.transport.sendto(f"HELLO * HTTP/1.0\n{gdm.client_data}".encode('utf8'),
                                   (GDM_MULTICAST_ADDR, GDM_MULTICAST_PORT))

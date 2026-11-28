@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
+import aiohttp
 from dotmap import DotMap  # type: ignore[import]
 
 logger = logging.getLogger(__name__)
@@ -190,8 +191,7 @@ class VirtualDlnaDevice:
     async def _resolve_members(self) -> Tuple[List["DlnaDevice"], List[str]]:
         from dlna.dlna_device import devices as physical_devices  # avoid circular import
 
-        resolved = []
-        missing = []
+        resolved: list["DlnaDevice"] = []
         member_order = {uuid: idx for idx, uuid in enumerate(self.member_uuids)}
 
         for device in physical_devices:
@@ -263,7 +263,7 @@ class VirtualDlnaDevice:
             return "None"
         return f"{type(result).__name__}"
 
-    async def _fan_out(self, method_name: str, *args, **kwargs):
+    async def _fan_out(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         from plex.adapters import adapter_by_device  # local import to avoid cycle
         
         resolved, _ = await self._resolve_members()
@@ -299,7 +299,12 @@ class VirtualDlnaDevice:
 
         try:
             # Helper to call method on a single device with logging
-            async def call_member(device, method_name, *args, **kwargs):
+            async def call_member(
+                device: "DlnaDevice",
+                method_name: str,
+                *args: Any,
+                **kwargs: Any,
+            ) -> Any:
                 method = getattr(device, method_name)
                 logger.debug("virtual group %s: %s start for member %s", self.name, method_name, device.name)
                 try:
@@ -340,7 +345,7 @@ class VirtualDlnaDevice:
                 adapter._controlled_by_virtual_device = previous
         return first_success
 
-    async def _aggregate_first(self, method_name: str, *args, **kwargs):
+    async def _aggregate_first(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         resolved, _ = await self._resolve_members()
         for device in resolved:
             try:
@@ -362,7 +367,11 @@ class VirtualDlnaDevice:
     # ------------------------------------------------------------------
     # DLNA-like control surface
     # ------------------------------------------------------------------
-    async def SetAVTransportURI(self, data, client=None):
+    async def SetAVTransportURI(
+        self,
+        data: dict[str, Any] | str,
+        client: aiohttp.ClientSession | None = None,
+    ) -> Any:
         from plex.adapters import adapter_by_device  # local import to avoid cycle
 
         # Accept either a dict (CurrentURI + CurrentURIMetaData, the form used by
@@ -422,11 +431,11 @@ class VirtualDlnaDevice:
             self._release_all_control()
             raise
 
-    async def Play(self, client=None):
+    async def Play(self, client: aiohttp.ClientSession | None = None) -> Any:
         self._is_actively_playing = True  # Virtual device is being commanded to play
         return await self._fan_out("Play", client=client)
 
-    async def Stop(self, client=None):
+    async def Stop(self, client: aiohttp.ClientSession | None = None) -> Any:
         self._is_actively_playing = False  # Virtual device is being stopped
         self._active_target_uri = None
         try:
@@ -434,14 +443,14 @@ class VirtualDlnaDevice:
         finally:
             self._release_all_control()
 
-    async def Pause(self, client=None):
+    async def Pause(self, client: aiohttp.ClientSession | None = None) -> Any:
         self._is_actively_playing = False  # Virtual device is being paused
         return await self._fan_out("Pause", client=client)
 
-    async def Seek(self, position: str, client=None):
+    async def Seek(self, position: str, client: aiohttp.ClientSession | None = None) -> Any:
         return await self._fan_out("Seek", position, client=client)
 
-    async def SetVolume(self, volume_value: int, client=None):
+    async def SetVolume(self, volume_value: int, client: aiohttp.ClientSession | None = None) -> bool:
         from plex.adapters import adapter_by_device  # local import to avoid cycle
         from dlna.virtual.volume import map_volume_to_device
         
@@ -493,7 +502,7 @@ class VirtualDlnaDevice:
                 adapter._controlled_by_virtual_device = previous
         return True
 
-    async def GetVolume(self, client=None):
+    async def GetVolume(self, client: aiohttp.ClientSession | None = None) -> DotMap:
         resolved, _ = await self._resolve_members()
         active_devices = self._filter_active_devices(resolved)
         if not active_devices:
@@ -512,7 +521,7 @@ class VirtualDlnaDevice:
         avg = sum(volumes) // len(volumes)
         return DotMap(CurrentVolume=avg)
 
-    async def GetMute(self, client=None):
+    async def GetMute(self, client: aiohttp.ClientSession | None = None) -> DotMap:
         resolved, _ = await self._resolve_members()
         active_devices = self._filter_active_devices(resolved)
         if not active_devices:
@@ -529,7 +538,7 @@ class VirtualDlnaDevice:
                 continue
         return DotMap(CurrentMute=any_muted)
 
-    async def GetTransportInfo(self, client=None):
+    async def GetTransportInfo(self, client: aiohttp.ClientSession | None = None) -> DotMap:
         from plex.adapters import adapter_by_device  # local import to avoid cycle
 
         # Only return playing state if this virtual device was explicitly commanded to play
@@ -575,7 +584,7 @@ class VirtualDlnaDevice:
         info.CurrentTransportState = state_val
         return info
 
-    async def GetPositionInfo(self, client=None):
+    async def GetPositionInfo(self, client: aiohttp.ClientSession | None = None) -> DotMap:
         from plex.adapters import adapter_by_device  # local import to avoid cycle
 
         # Only return position info if this virtual device was explicitly commanded to play

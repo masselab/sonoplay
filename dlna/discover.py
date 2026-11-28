@@ -5,6 +5,8 @@ import socket
 import time
 from typing import Any
 
+from typing_extensions import override
+
 logger = logging.getLogger(__name__)
 
 from settings import settings
@@ -57,6 +59,7 @@ def get_protocol(discover: "DlnaDiscover") -> type[asyncio.DatagramProtocol]:
             discover.protocol = self
             self.is_connected: bool = False
 
+        @override
         def connection_made(self, transport: asyncio.BaseTransport) -> None:
             assert isinstance(transport, asyncio.DatagramTransport)
             self.transport = transport
@@ -73,6 +76,7 @@ def get_protocol(discover: "DlnaDiscover") -> type[asyncio.DatagramProtocol]:
                     await asyncio.sleep(0)
                 await asyncio.sleep(SEND_INTERVAL_SECS)
 
+        @override
         def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
             try:
                 info = [a.split(":", 1)
@@ -87,9 +91,11 @@ def get_protocol(discover: "DlnaDiscover") -> type[asyncio.DatagramProtocol]:
                 return
             asyncio.create_task(discover.on_new_device(location))
 
+        @override
         def error_received(self, exc: Exception) -> None:
             logger.error("Error received: %s", exc)
 
+        @override
         def connection_lost(self, exc: Exception | None) -> None:
             logger.warning("Socket closed, stop the event loop")
             self.is_connected = False

@@ -4,6 +4,8 @@ import logging
 import re
 import sys
 
+from typing_extensions import override
+
 
 _LEVELS = {
     "DEBUG": logging.DEBUG,
@@ -20,6 +22,7 @@ class _RedactingFormatter(logging.Formatter):
         super().__init__()
         self.formatter = formatter or logging.Formatter()
 
+    @override
     def format(self, record: logging.LogRecord) -> str:
         message = self.formatter.format(record)
         message = _TOKEN_IN_URL.sub(r"\g<1>[redacted]", message)

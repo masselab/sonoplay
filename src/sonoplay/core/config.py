@@ -11,12 +11,13 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
+from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings
 
 logger = logging.getLogger(__name__)
 
 
-def atomic_write_json(path: Path, data: dict) -> None:
+def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
     """Write JSON data atomically using temp file + rename.
     
     This prevents data corruption if the process is killed or crashes
@@ -56,6 +57,8 @@ DEFAULT_STATS = {
 
 class Settings(BaseSettings):
     """Application configuration loaded from environment variables."""
+
+    _data_cache: dict[str, Any] | None = PrivateAttr(default=None)
     
     http_port: int = 32488
     host_ip: str | None = None

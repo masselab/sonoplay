@@ -3,6 +3,8 @@ import logging
 import socket
 from typing import Any
 
+from typing_extensions import override
+
 from settings import settings
 from utils import PlexDeviceLike
 
@@ -22,6 +24,7 @@ def get_protocol(gdm: "PlexGDM") -> type[asyncio.DatagramProtocol]:
             gdm.protocol = self
             self.is_connected = False
 
+        @override
         def connection_made(self, transport: asyncio.BaseTransport) -> None:
             assert isinstance(transport, asyncio.DatagramTransport)
             self.transport = transport
@@ -29,6 +32,7 @@ def get_protocol(gdm: "PlexGDM") -> type[asyncio.DatagramProtocol]:
             self.transport.sendto(f"HELLO * HTTP/1.0\n{gdm.client_data}".encode('utf8'),
                                   (GDM_MULTICAST_ADDR, GDM_MULTICAST_PORT))
 
+        @override
         def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
             if data.decode("utf8").startswith("M-SEARCH * HTTP/1."):
                 if addr[0] == "127.0.0.1":
@@ -41,9 +45,11 @@ def get_protocol(gdm: "PlexGDM") -> type[asyncio.DatagramProtocol]:
                 except Exception as e:
                     logger.warning("unable to send client message: %s", e)
 
+        @override
         def error_received(self, exc: Exception) -> None:
             logger.error("Error received: %s", exc)
 
+        @override
         def connection_lost(self, exc: Exception | None) -> None:
             logger.warning("Socket closed, stop the event loop")
             self.is_connected = False

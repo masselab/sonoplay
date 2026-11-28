@@ -29,6 +29,7 @@ dependencies = [
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-multipart>=0.0.6",
+    "typing-extensions>=4.4.0",
     "uvicorn[standard]>=0.23.0",
     "uvloop>=0.23.0; sys_platform != 'win32'",  # >=0.23.0 fixes create_connection fd double-close (MagicStack/uvloop#738)
     "xmltodict>=0.13.0",
@@ -74,3 +75,4 @@ project-includes = [
 ]
 search-path = [".", "src"]
 python-version = "3.11"
+preset = "strict"

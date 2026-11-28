@@ -14,9 +14,12 @@ DataStore abstraction layer for future database migration.
 Currently backed by JSON files, but can be swapped for SQLAlchemy/ORM later.
 """
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
-from typing import Dict, Optional, Any, Callable
 from copy import deepcopy
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
+
+if TYPE_CHECKING:
+    from settings import Settings
 
 
 class DataStore(ABC):
@@ -102,7 +105,7 @@ DEFAULT_AUDIO_SETTINGS = {
     "sample_rate_hz": 48000,   # 48kHz max for Sonos/most DLNA
 }
 
-DEFAULT_ONBOARDING_STATE = {
+DEFAULT_ONBOARDING_STATE: dict[str, Any] = {
     "completed": False,
     "completed_at": None,
     "steps": {}
@@ -112,7 +115,7 @@ DEFAULT_ONBOARDING_STATE = {
 class JSONDataStore(DataStore):
     """JSON file-based implementation of DataStore."""
     
-    def __init__(self, settings_instance):
+    def __init__(self, settings_instance: "Settings") -> None:
         """Initialize with reference to existing Settings instance."""
         self._settings = settings_instance
 
@@ -221,12 +224,13 @@ class JSONDataStore(DataStore):
         meta = dict(data.get(self._META_KEY, {}))
         onboarding = deepcopy(DEFAULT_ONBOARDING_STATE)
         stored_state = meta.get("onboarding", {})
+        empty_steps: dict[str, Any] = {}
         if isinstance(stored_state, dict):
             onboarding.update({k: v for k, v in stored_state.items() if k in onboarding})
             steps = stored_state.get("steps", {})
-            onboarding["steps"] = steps if isinstance(steps, dict) else {}
+            onboarding["steps"] = steps if isinstance(steps, dict) else empty_steps
         else:
-            onboarding["steps"] = {}
+            onboarding["steps"] = empty_steps
         return onboarding
 
     def set_onboarding_state(self, *, completed: Optional[bool] = None,

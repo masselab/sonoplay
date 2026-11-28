@@ -26,6 +26,7 @@ from pathlib import Path
 import threading
 from typing import Any, Callable, ClassVar, TYPE_CHECKING
 
+from pydantic import PrivateAttr
 from pydantic_settings import BaseSettings
 
 if TYPE_CHECKING:
@@ -92,6 +93,7 @@ datastore: "JSONDataStore | None" = None
 
 class Settings(BaseSettings):
     datastore: ClassVar["JSONDataStore"]
+    _data_cache: dict[str, Any] | None = PrivateAttr(default=None)
     http_port: int = 32488
     log_level: str = "INFO"  # DEBUG, INFO, WARNING or ERROR
     host_ip: str | None = None

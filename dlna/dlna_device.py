@@ -260,7 +260,7 @@ class DlnaDeviceService:
             raise Exception(f"No such action {action}, {self.service_type}")
 
         if action_spec.argumentList.argument:
-            args = []
+            args: list[Any]
             if isinstance(action_spec.argumentList.argument, list):
                 args = action_spec.argumentList.argument
             else:
@@ -477,7 +477,10 @@ class DlnaDevice:
                 self.services = {}
                 renderer_name = None
 
-                def register_service(service, source_device=None):
+                def register_service(
+                    service: dict[str, Any],
+                    source_device: dict[str, Any] | None = None,
+                ) -> None:
                     nonlocal renderer_name
                     service_type = as_text(service.get('serviceType'))
                     if not service_type:
@@ -493,22 +496,26 @@ class DlnaDevice:
                     if normalized_type not in self.services:
                         self.services[normalized_type] = DlnaDeviceService(service, self)
 
-                def walk_device(dev_section):
+                def walk_device(dev_section: dict[str, Any]) -> None:
                     service_block = dev_section.get('serviceList', {})
-                    service_list = service_block.get('service', [])
-                    if service_list is None:
-                        service_list = []
-                    if not isinstance(service_list, (list, tuple)):
-                        service_list = [service_list]
+                    raw_services = service_block.get('service')
+                    if raw_services is None:
+                        service_list: list[Any] = []
+                    elif isinstance(raw_services, (list, tuple)):
+                        service_list = list(raw_services)
+                    else:
+                        service_list = [raw_services]
                     for service in service_list:
                         if service:
                             register_service(service, source_device=dev_section)
                     device_block = dev_section.get('deviceList', {})
-                    child_devices = device_block.get('device', [])
-                    if child_devices is None:
-                        child_devices = []
-                    if not isinstance(child_devices, (list, tuple)):
-                        child_devices = [child_devices]
+                    raw_children = device_block.get('device')
+                    if raw_children is None:
+                        child_devices: list[Any] = []
+                    elif isinstance(raw_children, (list, tuple)):
+                        child_devices = list(raw_children)
+                    else:
+                        child_devices = [raw_children]
                     for child in child_devices:
                         if child:
                             walk_device(child)
@@ -548,7 +555,8 @@ class DlnaDevice:
         client: aiohttp.ClientSession | None = None,
     ) -> Any:
         if data is None:
-            data = {}
+            empty_data: dict[str, Any] = {}
+            data = empty_data
         await self.get_data()
         service = None
         if service_type is not None:

@@ -36,6 +36,7 @@ from fastapi.responses import Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
+from typing_extensions import override
 import uvicorn
 
 from dlna import (
@@ -1028,6 +1029,7 @@ class SuppressNoisyHTTPLogsFilter(logging.Filter):
 
     _QUIET_GET_PATHS = {"/api/devices", "/player/timeline/poll", "/health", "/resources"}
 
+    @override
     def filter(self, record: logging.LogRecord) -> bool:
         args = record.args
         if not isinstance(args, tuple) or len(args) != 5:

@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 # elsewhere is left alone (consistent with test_audio_settings.py /
 # test_xml_unescape.py).
 for _key in list(sys.modules):
-    if not (_key in ("utils", "dotmap", "xmltodict", "settings")
+    if not (_key in ("utils", "dlna", "dlna.dlna_device", "dotmap", "xmltodict", "settings")
             or _key.startswith(("utils.", "dotmap.", "xmltodict.", "settings."))):
         continue
     _mod = sys.modules[_key]
@@ -18,6 +18,7 @@ for _key in list(sys.modules):
     ):
         del sys.modules[_key]
 
+from dlna.dlna_device import DlnaDeviceService
 from utils import build_didl_lite_metadata, mime_type_for_container
 
 
@@ -96,8 +97,84 @@ def test_didl_lite_omits_optional_tags_when_absent():
     )
     assert "<upnp:artist>" not in metadata
     assert "<upnp:album>" not in metadata
+    assert "<upnp:albumArtURI>" not in metadata
     assert "<dc:creator>" not in metadata
     assert "duration=" not in metadata
+
+
+def test_didl_lite_includes_and_escapes_album_art_uri():
+    art_url = "http://192.168.1.50:32400/library/metadata/10/thumb/1700000000?X-Plex-Token=abc&foo=bar"
+    metadata = build_didl_lite_metadata(
+        item_id="1",
+        title="Track Title",
+        url="http://192.168.1.50:32400/library/parts/1/file.mp3?X-Plex-Token=abc",
+        album_art_uri=art_url,
+    )
+    assert "<upnp:albumArtURI>" in metadata
+    assert "dlna:profileID" not in metadata
+    assert "X-Plex-Token=abc&amp;foo=bar" in metadata
+
+    root = ET.fromstring(metadata)
+    ns = {"upnp": "urn:schemas-upnp-org:metadata-1-0/upnp/"}
+    art_el = root.find(".//upnp:albumArtURI", ns)
+    assert art_el is not None
+    assert art_el.text == art_url
+
+
+def test_didl_lite_omits_album_art_uri_when_none_or_empty():
+    for empty_val in (None, ""):
+        metadata = build_didl_lite_metadata(
+            item_id="1",
+            title="Track Title",
+            url="http://example.com/a.mp3",
+            album_art_uri=empty_val,
+        )
+        assert "<upnp:albumArtURI>" not in metadata
+
+
+def test_soap_payload_escapes_current_uri_metadata_with_album_art_uri():
+    """Verify DlnaDeviceService.payload_from_template double-escapes CurrentURIMetaData
+    so the outer SOAP XML is well-formed and round-trips back to valid DIDL-Lite."""
+    art_url = "http://192.168.1.50:32400/library/metadata/10/thumb/1?X-Plex-Token=tok&size=large"
+    stream_url = "http://192.168.1.50:32400/library/parts/1/file.flac?X-Plex-Token=tok"
+    metadata = build_didl_lite_metadata(
+        item_id="10",
+        title="Song & Dance",
+        url=stream_url,
+        mime_type="audio/flac",
+        album_art_uri=art_url,
+    )
+
+    device = MagicMock()
+    device.location_url = "http://192.168.1.99:1400/xml/device_description.xml"
+    service = DlnaDeviceService(
+        {
+            "serviceType": "urn:schemas-upnp-org:service:AVTransport:1",
+            "controlURL": "/MediaRenderer/AVTransport/Control",
+            "eventSubURL": "/MediaRenderer/AVTransport/Event",
+            "SCPDURL": "/xml/AVTransport1.xml",
+        },
+        device,
+    )
+    soap_payload = service.payload_from_template(
+        "SetAVTransportURI",
+        {
+            "InstanceID": 0,
+            "CurrentURI": stream_url,
+            "CurrentURIMetaData": metadata,
+        },
+    )
+
+    soap_root = ET.fromstring(soap_payload)
+    meta_el = soap_root.find(".//CurrentURIMetaData")
+    assert meta_el is not None
+    assert meta_el.text == metadata
+
+    didl_root = ET.fromstring(meta_el.text)
+    ns = {"upnp": "urn:schemas-upnp-org:metadata-1-0/upnp/"}
+    art_el = didl_root.find(".//upnp:albumArtURI", ns)
+    assert art_el is not None
+    assert art_el.text == art_url
 
 
 def test_didl_lite_falls_back_to_item_id_zero_when_missing():

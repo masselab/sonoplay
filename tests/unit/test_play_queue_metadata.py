@@ -19,12 +19,40 @@ for _key in list(sys.modules):
     ):
         del sys.modules[_key]
 
+import xml.etree.ElementTree as ET
+from types import SimpleNamespace
+
+import pytest
 from dotmap import DotMap
+import plex.play_queue as play_queue_mod
 from plex.play_queue import PlayQueue
 
 
-def _make_queue():
-    return PlayQueue(container_key="/playQueues/1", plex_lib=None)
+@pytest.fixture(autouse=True)
+def _clean_settings(monkeypatch):
+    """Ensure play_queue.settings is not a leftover MagicMock from another test file."""
+    monkeypatch.setattr(play_queue_mod, "settings", SimpleNamespace(pms_address=None))
+
+
+def _make_queue(plex_lib=None):
+    return PlayQueue(container_key="/playQueues/1", plex_lib=plex_lib)
+
+
+def _make_plex_lib(protocol="http", address="192.168.1.50", port="32400", token="secret-token"):
+    lib = SimpleNamespace(protocol=protocol, address=address, port=port, token=token)
+
+    def build_url(resource: str, token: bool = True) -> str:
+        if play_queue_mod.settings.pms_address:
+            url = f"http://{play_queue_mod.settings.pms_address}:{lib.port}{resource}"
+        else:
+            url = f"{lib.protocol}://{lib.address}:{lib.port}{resource}"
+        if token:
+            sep = "&" if "?" in resource else "?"
+            url += f"{sep}X-Plex-Token={lib.token}"
+        return url
+
+    lib.build_url = build_url
+    return lib
 
 
 def _track(**overrides):
@@ -77,3 +105,93 @@ def test_metadata_for_track_is_never_empty():
     metadata = queue.metadata_for_track(track, "http://host/stream.mp3", force_transcode=False)
     assert metadata
     assert metadata.strip() != ""
+
+
+def _extract_album_art_uri(metadata: str) -> str | None:
+    root = ET.fromstring(metadata)
+    ns = {"upnp": "urn:schemas-upnp-org:metadata-1-0/upnp/"}
+    el = root.find(".//upnp:albumArtURI", ns)
+    return el.text if el is not None else None
+
+
+def test_metadata_album_art_priority_order():
+    queue = _make_queue(plex_lib=_make_plex_lib())
+
+    # 1. thumb takes precedence over all others
+    track = _track(
+        thumb="/library/metadata/1/thumb/10",
+        parentThumb="/library/metadata/2/thumb/20",
+        grandparentThumb="/library/metadata/3/thumb/30",
+        art="/library/metadata/3/art/40",
+    )
+    assert _extract_album_art_uri(queue.metadata_for_track(track, "http://host/s.flac")) == (
+        "http://192.168.1.50:32400/library/metadata/1/thumb/10?X-Plex-Token=secret-token"
+    )
+
+    # 2. parentThumb when thumb is absent
+    track = _track(
+        parentThumb="/library/metadata/2/thumb/20",
+        grandparentThumb="/library/metadata/3/thumb/30",
+        art="/library/metadata/3/art/40",
+    )
+    assert _extract_album_art_uri(queue.metadata_for_track(track, "http://host/s.flac")) == (
+        "http://192.168.1.50:32400/library/metadata/2/thumb/20?X-Plex-Token=secret-token"
+    )
+
+    # 3. grandparentThumb when thumb and parentThumb are absent
+    track = _track(
+        grandparentThumb="/library/metadata/3/thumb/30",
+        art="/library/metadata/3/art/40",
+    )
+    assert _extract_album_art_uri(queue.metadata_for_track(track, "http://host/s.flac")) == (
+        "http://192.168.1.50:32400/library/metadata/3/thumb/30?X-Plex-Token=secret-token"
+    )
+
+    # 4. art as final fallback
+    track = _track(art="/library/metadata/3/art/40")
+    assert _extract_album_art_uri(queue.metadata_for_track(track, "http://host/s.flac")) == (
+        "http://192.168.1.50:32400/library/metadata/3/art/40?X-Plex-Token=secret-token"
+    )
+
+
+def test_metadata_album_art_uses_absolute_url_as_is():
+    plex_lib = _make_plex_lib()
+    plex_lib.build_url = MagicMock(side_effect=AssertionError("build_url should not be called"))
+    queue = _make_queue(plex_lib=plex_lib)
+
+    for url in ("http://cdn.example.com/art.jpg", "https://cdn.example.com/art.png?a=1&b=2"):
+        track = _track(thumb=url)
+        metadata = queue.metadata_for_track(track, "http://host/s.flac")
+        assert _extract_album_art_uri(metadata) == url
+
+
+def test_metadata_album_art_omitted_when_missing_or_incomplete_plex_lib():
+    # No artwork fields on track
+    queue = _make_queue(plex_lib=_make_plex_lib())
+    assert "<upnp:albumArtURI>" not in queue.metadata_for_track(_track(), "http://host/s.flac")
+
+    # plex_lib is None
+    queue_no_lib = _make_queue(plex_lib=None)
+    assert "<upnp:albumArtURI>" not in queue_no_lib.metadata_for_track(
+        _track(thumb="/library/metadata/1/thumb/10"), "http://host/s.flac"
+    )
+
+    # plex_lib missing protocol or address
+    for incomplete in (
+        _make_plex_lib(protocol="", address="192.168.1.50"),
+        _make_plex_lib(protocol="http", address=""),
+    ):
+        q = _make_queue(plex_lib=incomplete)
+        meta = q.metadata_for_track(_track(thumb="/library/metadata/1/thumb/10"), "http://host/s.flac")
+        assert "<upnp:albumArtURI>" not in meta
+        assert "://:" not in meta
+
+
+def test_metadata_album_art_uses_pms_address_override_even_if_lib_host_empty(monkeypatch):
+    monkeypatch.setattr(play_queue_mod.settings, "pms_address", "10.0.0.5")
+    queue = _make_queue(plex_lib=_make_plex_lib(protocol="", address="", port="32400", token="tok"))
+    track = _track(thumb="/library/metadata/1/thumb/10")
+    metadata = queue.metadata_for_track(track, "http://host/s.flac")
+    assert _extract_album_art_uri(metadata) == (
+        "http://10.0.0.5:32400/library/metadata/1/thumb/10?X-Plex-Token=tok"
+    )

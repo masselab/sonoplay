@@ -243,6 +243,26 @@ class PlayQueue:
         
         return self._build_stream_url(track.Media[0].Part[0].key)
 
+    def _album_art_uri_for_track(self, track: Any) -> str | None:
+        """Return a full album art URL for the track, or None if unavailable."""
+        artwork_path: str | None = None
+        for attr in ("thumb", "parentThumb", "grandparentThumb", "art"):
+            candidate = getattr(track, attr, None)
+            if isinstance(candidate, str) and candidate:
+                artwork_path = candidate
+                break
+        if not artwork_path:
+            return None
+        if artwork_path.startswith(("http://", "https://")):
+            return artwork_path
+        if self.plex_lib is None:
+            return None
+        if not settings.pms_address and not (
+            getattr(self.plex_lib, "protocol", None) and getattr(self.plex_lib, "address", None)
+        ):
+            return None
+        return self.plex_lib.build_url(artwork_path, token=True)
+
     def metadata_for_track(self, track: Any, url: str, force_transcode: bool = False) -> str:
         """
         Build DIDL-Lite CurrentURIMetaData for a track.
@@ -270,6 +290,7 @@ class PlayQueue:
             mime_type=mime_type,
             artist=getattr(track, 'grandparentTitle', None),
             album=getattr(track, 'parentTitle', None),
+            album_art_uri=self._album_art_uri_for_track(track),
             duration_ms=getattr(track, 'duration', None),
         )
 

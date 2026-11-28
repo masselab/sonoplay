@@ -3,7 +3,7 @@ from collections.abc import Awaitable, Callable
 import logging
 import socket
 import time
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +58,7 @@ def get_protocol(discover: "DlnaDiscover") -> type[asyncio.DatagramProtocol]:
             self.is_connected: bool = False
 
         def connection_made(self, transport: asyncio.BaseTransport) -> None:
-            assert isinstance(transport, asyncio.DatagramTransport)
-            self.transport = transport
+            self.transport = cast(asyncio.DatagramTransport, transport)
             self.is_connected = True
             logger.info("dlna discover connected")
             asyncio.create_task(self.send_loop())

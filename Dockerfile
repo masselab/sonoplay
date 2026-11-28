@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM python:3.12-slim AS builder
+FROM python:3.13-slim AS builder
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /bin/uv
 
@@ -20,7 +20,7 @@ COPY src/ src/
 RUN uv sync --frozen --no-dev --no-editable
 
 # --- Final stage: minimal slim runtime ---
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 WORKDIR /app
 
@@ -29,10 +29,10 @@ RUN groupadd -r -g 999 sonoplay \
     && useradd -r -u 999 -g sonoplay -d /app -s /sbin/nologin sonoplay \
     && mkdir -p /config \
     && chown sonoplay:sonoplay /config \
-    && rm -rf /usr/local/lib/python3.12/ensurepip \
-              /usr/local/lib/python3.12/idlelib \
-              /usr/local/lib/python3.12/tkinter \
-              /usr/local/lib/python3.12/site-packages/pip* \
+    && rm -rf /usr/local/lib/python3.13/ensurepip \
+              /usr/local/lib/python3.13/idlelib \
+              /usr/local/lib/python3.13/tkinter \
+              /usr/local/lib/python3.13/site-packages/pip* \
               /usr/local/bin/pip*
 
 # Copy self-contained venv and application code directly with final ownership
